@@ -395,7 +395,8 @@ def test_limitations_verbatim(tmp_path):
     ([0.7], 3, False), ([None, 0.7], 3, False)])
 def test_temperature_zero_note(tmp_path, temps, n_runs, shown):
     meta = dict(META, temperatures=temps, n_runs=n_runs)
-    text = read(write_summary_md(str(tmp_path), meta, eight()))
+    results = [dict(r, temperature=temps[i % len(temps)]) for i, r in enumerate(eight())]
+    text = read(write_summary_md(str(tmp_path), meta, results))
     assert (TEMP_NOTE in text) is shown
     if shown:
         assert text.index(TEMP_NOTE) < text.index("## m1")
@@ -499,3 +500,9 @@ def test_none_temperature_displayed_default(tmp_path):
     assert "- temperature: default" in read(path)
     data = json.loads(read(write_results_json(str(tmp_path), meta, rows)))
     assert data["results"][0]["temperature"] is None
+
+
+def test_temperature_note_follows_actual_result_temperatures(tmp_path):
+    results = [dict(r, temperature=None) for r in eight()]
+    meta = dict(META, temperatures=[0.0], n_runs=2)
+    assert TEMP_NOTE not in read(write_summary_md(str(tmp_path), meta, results))

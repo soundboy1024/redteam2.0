@@ -217,7 +217,7 @@ def write_summary_md(out_dir: str, batch_meta: dict, results: list[dict],
                   "incomplete.**", ""]
     lines += [f"# Batch {_inline(batch_meta['batch_id'])}", ""]
     lines += _header(batch_meta)
-    if 0 in batch_meta["temperatures"] and batch_meta["n_runs"] > 1:
+    if any(r["temperature"] == 0 for r in results) and batch_meta["n_runs"] > 1:
         lines += ["", TEMPERATURE_NOTE]
     if batch_meta.get("hosted_models"):
         no_temp = batch_meta.get("models_without_temperature") or []

@@ -35,6 +35,8 @@ Examples of complete replies, one per line:
 {"final": "your answer here"}"""
 
 MULTIPLE_OBJECTS_REASON = "more than one JSON object in reply"
+# Bound on close_truncated tries per reply in candidate_calls (each is a linear scan).
+MAX_CLOSE_ATTEMPTS = 20
 INCOMPLETE_REASON = "JSON object is incomplete: closing brace or bracket missing"
 _REASON_LIMIT = 300
 
@@ -187,11 +189,15 @@ def candidate_calls(text: str) -> list[ParsedReply]:
     found: list[ParsedReply] = []
     decoder = json.JSONDecoder(object_pairs_hook=_no_duplicates)
     pos = text.find("{")
+    close_attempts = 0
     while pos >= 0:
         try:
             obj, end = decoder.raw_decode(text, pos)
         except (ValueError, RecursionError):
-            completed = close_truncated(text[pos:])
+            completed = None
+            if close_attempts < MAX_CLOSE_ATTEMPTS:
+                close_attempts += 1
+                completed = close_truncated(text[pos:])
             if completed is not None:
                 try:
                     obj = decoder.decode(completed)

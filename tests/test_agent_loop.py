@@ -585,3 +585,17 @@ def test_parse_failure_harness_error_row_keeps_parse_reason(tmp_path, monkeypatc
                   "p", [], 5, rows.append)
     assert rows[1]["parse_reason"] == "no JSON object found"
     assert rows[1]["done_reason"] == "length"
+
+
+def test_candidate_calls_many_unclosed_braces_is_fast():
+    import time
+    start = time.perf_counter()
+    assert candidate_calls("{" * 20000) == []
+    assert time.perf_counter() - start < 1.0
+
+
+def test_parse_reply_long_brace_tail_is_fast():
+    import time
+    start = time.perf_counter()
+    parse_reply('{"final": "x"}' + "{" * 20000)
+    assert time.perf_counter() - start < 1.0

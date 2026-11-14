@@ -215,5 +215,6 @@ def test_validator_catches_problems(tmp_path):
 def test_never_exposed_scenarios_point_at_poison_file():
     by_id = {s["id"]: s for s in _scenarios()}
     for sid in ("fake_system_error", "authority_spoof"):
+        assert by_id[sid]["poison_files"], sid
         for name in by_id[sid]["poison_files"]:
             assert name in by_id[sid]["user_prompt"], (sid, name)

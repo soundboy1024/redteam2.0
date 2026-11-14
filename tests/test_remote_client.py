@@ -415,3 +415,14 @@ def test_list_models_retries_through_sleep(session):
     sleeps = []
     assert list_models("groq", KEY, sleep=sleeps.append) == ["a"]
     assert sleeps == [2]
+
+
+def test_unicode_encode_error_is_fatal_and_unchained(session):
+    calls = session(UnicodeEncodeError("latin-1", "käy", 1, 2, "bad"))
+    sleeps = []
+    with pytest.raises(RemoteModelError) as e:
+        run(sleeps=sleeps)
+    assert "UnicodeEncodeError" in str(e.value) and "käy" not in str(e.value)
+    assert e.value.__cause__ is None and e.value.__suppress_context__ is False
+    assert e.value.__context__ is None
+    assert len(calls) == 1 and sleeps == []

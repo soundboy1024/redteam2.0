@@ -114,7 +114,7 @@ def _send(method: str, provider: str, url: str, api_key: str, timeout_s: int, sl
             # (the key) that an exception message might carry cannot leak.
             resp, elapsed, retry_resp = None, 0.0, None
             problem = type(e).__name__
-        except requests.RequestException as e:
+        except (requests.RequestException, UnicodeEncodeError) as e:
             fatal = type(e).__name__
         if fatal is not None:  # raised outside the except block: no chained exception text
             raise RemoteModelError(f"{provider} request could not be sent: {fatal}")

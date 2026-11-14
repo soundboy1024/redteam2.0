@@ -94,9 +94,11 @@ def _default_chat_fn_factory(cfg: dict, telemetry: bool) -> Callable:
         if provider is not None:
             if telemetry:
                 raise ValueError(f"telemetry is local-only; refusing hosted model {model!r}")
-            key = os.environ.get(remote_client.PROVIDERS[provider]["key_env"], "")
-            if not key:
-                raise ValueError(f"{remote_client.PROVIDERS[provider]['key_env']} is not set")
+            var = remote_client.PROVIDERS[provider]["key_env"]
+            key = os.environ.get(var, "")
+            defect = _key_defect(key)
+            if defect:
+                raise ValueError(f"environment variable {var} {defect}")
             return _hosted_chat_fn(cfg, model, repetition_index, temperature, key)
         if temperature is None:
             raise ValueError(f"local model {model!r} was given no temperature; only hosted "

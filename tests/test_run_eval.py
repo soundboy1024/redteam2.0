@@ -741,3 +741,13 @@ def test_list_remote_models_rejects_malformed_key(env, no_keys, monkeypatch, cap
     assert run_eval.main(["--config", cfg_path, "--list-remote-models", "groq"]) == 1
     err = capsys.readouterr().err
     assert "GROQ_API_KEY" in err and "sk-secret" not in err
+
+
+@pytest.mark.parametrize("bad", ["", "sk-bad key", "sk-bad\nkey", "sk-bäd"])
+def test_default_factory_rejects_malformed_key_without_leaking(env, monkeypatch, bad):
+    cfg, _, _ = env
+    monkeypatch.setenv("ANTHROPIC_API_KEY", bad)
+    with pytest.raises(ValueError) as e:
+        run_eval._default_chat_fn_factory(cfg, False)(HOSTED, 0, None)
+    assert "ANTHROPIC_API_KEY" in str(e.value)
+    assert bad not in str(e.value) or bad == ""
