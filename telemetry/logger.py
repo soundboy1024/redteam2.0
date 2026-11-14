@@ -4,14 +4,21 @@ Every row is validated before anything is written. SQLite is written first,
 then the JSONL line; a failure in either raises to the caller.
 """
 import json
+import math
 import os
+import re
 import sqlite3
 from contextlib import closing
 from dataclasses import dataclass
 from datetime import datetime, timezone
 
-from telemetry.schema import (AGENT_STATES, BOOL_COLUMNS, DDL, RUN_COLUMNS,
-                              RUN_STATUSES, STEP_COLUMNS)
+from telemetry.schema import (AGENT_STATES, BOOL_COLUMNS, DDL, INTEGER_COLUMNS,
+                              REAL_COLUMNS, RUN_COLUMNS, RUN_STATUSES,
+                              STEP_COLUMNS)
+
+BATCH_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
+RESERVED_NAMES = {"CON", "PRN", "AUX", "NUL",
+                  *(f"COM{i}" for i in range(1, 10)), *(f"LPT{i}" for i in range(1, 10))}
 
 
 @dataclass
@@ -34,33 +41,94 @@ def _check_keys(row: dict, columns: tuple, what: str) -> None:
         raise KeyError(f"{what} keys wrong: missing {missing}, unexpected {unexpected}")
 
 
-def _check_common(row: dict) -> None:
+def _clean_text(s: str) -> str:
+    """Lone surrogates become visible backslash-u escapes; nothing else changes."""
+    return s.encode("utf-8", "backslashreplace").decode("utf-8")
+
+
+def _normalize(row: dict, columns: tuple) -> dict:
+    """Type-check every column and return the values to store (and to write as JSON)."""
+    out = {}
+    for col in columns:
+        v = row[col]
+        if col in BOOL_COLUMNS:
+            if not isinstance(v, bool):
+                raise ValueError(f"{col} must be a bool, got {type(v).__name__} {v!r}")
+        elif v is None:
+            pass
+        elif col in INTEGER_COLUMNS:
+            if isinstance(v, bool) or not isinstance(v, int):
+                raise ValueError(f"{col} must be an int or None, got {type(v).__name__}")
+        elif col in REAL_COLUMNS:
+            if isinstance(v, bool) or not isinstance(v, (int, float)):
+                raise ValueError(f"{col} must be a number or None, got {type(v).__name__}")
+            try:
+                v = float(v)
+            except OverflowError as exc:
+                raise ValueError(f"{col} is too large to store as a float") from exc
+            if not math.isfinite(v):
+                raise ValueError(f"{col} must be finite, got {v!r}")
+        else:
+            if not isinstance(v, str):
+                raise ValueError(f"{col} must be a str or None, got {type(v).__name__}")
+            v = _clean_text(v)
+        out[col] = v
+    return out
+
+
+def _check_run_id(row: dict) -> None:
     run_id = row["run_id"]
     if not isinstance(run_id, str) or not run_id:
         raise ValueError(f"run_id must be a non-empty string, got {run_id!r}")
-    for col in BOOL_COLUMNS:
-        if col in row and not isinstance(row[col], bool):
-            raise ValueError(f"{col} must be a bool, got {row[col]!r}")
 
 
-def _check_step(row: dict) -> None:
+def _check_step(row: dict) -> dict:
     _check_keys(row, STEP_COLUMNS, "step row")
-    _check_common(row)
-    if row["agent_state"] not in AGENT_STATES:
+    _check_run_id(row)
+    norm = _normalize(row, STEP_COLUMNS)
+    if norm["agent_state"] not in AGENT_STATES:
         raise ValueError(f"agent_state {row['agent_state']!r} not in {AGENT_STATES}")
+    return norm
 
 
-def _check_run(log: BatchLog, run: dict) -> None:
+def _check_run(log: BatchLog, run: dict) -> dict:
     _check_keys(run, RUN_COLUMNS, "run row")
-    _check_common(run)
-    if run["status"] not in RUN_STATUSES:
+    _check_run_id(run)
+    norm = _normalize(run, RUN_COLUMNS)
+    if norm["status"] not in RUN_STATUSES:
         raise ValueError(f"status {run['status']!r} not in {RUN_STATUSES}")
-    if run["batch_id"] != log.batch_id:
+    if norm["batch_id"] != log.batch_id:
         raise ValueError(f"run batch_id {run['batch_id']!r} != batch {log.batch_id!r}")
+    return norm
 
 
 def _db_values(row: dict, columns: tuple) -> list:
     return [int(row[c]) if c in BOOL_COLUMNS else row[c] for c in columns]
+
+
+def _sanitize_detail(v):
+    """Recursive: clean strings (keys too), turn non-finite floats into their repr."""
+    if isinstance(v, str):
+        return _clean_text(v)
+    if isinstance(v, float):
+        return v if math.isfinite(v) else repr(v)
+    if isinstance(v, dict):
+        out = {}
+        for k, val in v.items():
+            if isinstance(k, str):
+                k = _clean_text(k)
+            elif not (k is None or isinstance(k, (bool, int))):
+                k = _clean_text(repr(k))
+            out[k] = _sanitize_detail(val)
+        return out
+    if isinstance(v, (list, tuple)):
+        return [_sanitize_detail(x) for x in v]
+    return v
+
+
+def _dumps(obj) -> str:
+    return json.dumps(obj, ensure_ascii=False, default=lambda o: _clean_text(repr(o)),
+                      allow_nan=False)
 
 
 def _insert(db_path: str, table: str, columns: tuple, values: list) -> None:
@@ -77,18 +145,17 @@ def _append_line(path: str, obj: dict) -> None:
 
 
 def _bad_batch_id(batch_id) -> bool:
-    return (not isinstance(batch_id, str) or not batch_id or ".." in batch_id
-            or any(ch in batch_id for ch in "/\\:") or batch_id != batch_id.strip())
+    return (not isinstance(batch_id, str) or not BATCH_ID_RE.match(batch_id)
+            or batch_id.upper() in RESERVED_NAMES)
 
 
 def open_batch(db_path: str, results_dir: str, batch_id: str) -> BatchLog:
     if _bad_batch_id(batch_id):
         raise ValueError(f"invalid batch_id {batch_id!r}")
     out_dir = os.path.join(results_dir, batch_id)
-    if os.path.exists(os.path.join(out_dir, "steps.jsonl")):
-        raise ValueError(f"batch folder {out_dir} already has steps.jsonl; "
-                         "use a new batch_id")
-    os.makedirs(out_dir, exist_ok=True)
+    if os.path.exists(out_dir):
+        raise ValueError(f"batch folder {out_dir} already exists; use a new batch_id")
+    os.makedirs(out_dir)
     parent = os.path.dirname(db_path)
     if parent:
         os.makedirs(parent, exist_ok=True)
@@ -100,11 +167,14 @@ def open_batch(db_path: str, results_dir: str, batch_id: str) -> BatchLog:
 
 
 def log_step(log: BatchLog, row: dict) -> None:
-    _check_step(row)
-    line = {c: row[c] for c in STEP_COLUMNS}
-    json.dumps(line, ensure_ascii=False, default=repr)  # fail before any write
-    _insert(log.db_path, "steps", STEP_COLUMNS, _db_values(row, STEP_COLUMNS))
-    _append_line(os.path.join(log.out_dir, "steps.jsonl"), line)
+    norm = _check_step(row)
+    _dumps(norm)  # fail before any write
+    try:
+        _insert(log.db_path, "steps", STEP_COLUMNS, _db_values(norm, STEP_COLUMNS))
+    except sqlite3.IntegrityError as exc:
+        raise ValueError(f"step already logged for run_id {norm['run_id']!r}, "
+                         f"step_index {norm['step_index']!r}: {exc}") from exc
+    _append_line(os.path.join(log.out_dir, "steps.jsonl"), norm)
 
 
 def log_tool_event(log: BatchLog, run_id: str, event: dict) -> None:
@@ -112,15 +182,20 @@ def log_tool_event(log: BatchLog, run_id: str, event: dict) -> None:
         raise ValueError(f"run_id must be a non-empty string, got {run_id!r}")
     if not isinstance(event, dict):
         raise ValueError(f"event must be a dict, got {type(event).__name__}")
+    run_id = _clean_text(run_id)
     name = event.get("event")
     if not isinstance(name, str) or not name:
         raise ValueError(f"event needs a non-empty string 'event' name, got {name!r}")
-    if "run_id" in event and event["run_id"] != run_id:
+    name = _clean_text(name)
+    ev_run_id = event.get("run_id")
+    if "run_id" in event and (_clean_text(ev_run_id) if isinstance(ev_run_id, str)
+                              else ev_run_id) != run_id:
         raise ValueError(f"event run_id {event['run_id']!r} != run_id {run_id!r}")
-    detail = {k: v for k, v in event.items() if k not in ("event", "run_id")}
+    detail = _sanitize_detail(
+        {k: v for k, v in event.items() if k not in ("event", "run_id")})
     if "timestamp" in detail:
         raise ValueError("event detail may not contain 'timestamp'; it is set at write time")
-    detail_json = json.dumps(detail, ensure_ascii=False, default=repr)
+    detail_json = _dumps(detail)
     timestamp = _now()
     _insert(log.db_path, "tool_events", ("run_id", "timestamp", "event", "detail_json"),
             [run_id, timestamp, name, detail_json])
@@ -130,9 +205,9 @@ def log_tool_event(log: BatchLog, run_id: str, event: dict) -> None:
 
 
 def log_run(log: BatchLog, run: dict) -> None:
-    _check_run(log, run)
+    norm = _check_run(log, run)
     try:
-        _insert(log.db_path, "runs", RUN_COLUMNS, _db_values(run, RUN_COLUMNS))
+        _insert(log.db_path, "runs", RUN_COLUMNS, _db_values(norm, RUN_COLUMNS))
     except sqlite3.IntegrityError as exc:
         raise ValueError(f"run {run['run_id']!r} already logged: {exc}") from exc
 

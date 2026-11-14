@@ -44,7 +44,7 @@ def _columns_ddl(columns) -> str:
 DDL = (
     "CREATE TABLE IF NOT EXISTS steps (\n    id INTEGER PRIMARY KEY AUTOINCREMENT,\n    "
     + _columns_ddl(STEP_COLUMNS) + "\n)",
-    "CREATE INDEX IF NOT EXISTS idx_steps_run ON steps (run_id)",
+    "CREATE UNIQUE INDEX IF NOT EXISTS idx_steps_run_step ON steps (run_id, step_index)",
     "CREATE TABLE IF NOT EXISTS tool_events (\n"
     "    id INTEGER PRIMARY KEY AUTOINCREMENT,\n"
     "    run_id TEXT NOT NULL,\n    timestamp TEXT NOT NULL,\n"

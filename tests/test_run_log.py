@@ -71,15 +71,15 @@ def test_open_batch_creates_dir_and_tables(log):
     assert count(log.db_path, "steps") == 0
 
 
-@pytest.mark.parametrize("bad", ["", "a/b", "a\\b", "..", "x..y", "C:x", "../up"])
+@pytest.mark.parametrize("bad", ["", "a/b", "a\\b", "..", "x..y", "C:x", "../up", "a b",
+                                 "a.b", "x" * 65, "con", "NUL", "Com1", "lpt9", None, 5])
 def test_open_batch_rejects_bad_ids(tmp_path, bad):
     with pytest.raises(ValueError):
         logger.open_batch(str(tmp_path / "r.db"), str(tmp_path / "res"), bad)
 
 
-def test_open_batch_refuses_used_folder(log, tmp_path):
-    logger.log_step(log, make_step())
-    with pytest.raises(ValueError):
+def test_open_batch_refuses_existing_folder(log, tmp_path):
+    with pytest.raises(ValueError, match="already exists"):
         logger.open_batch(log.db_path, str(tmp_path / "results"), "b1")
 
 
@@ -106,12 +106,19 @@ def test_step_round_trip_and_jsonl(log):
         assert "café" in f.read()
 
 
-def test_steps_ordered_by_step_index_then_id(log):
-    logger.log_step(log, make_step(step_index=2))
-    logger.log_step(log, make_step(step_index=0, raw_response="a"))
-    logger.log_step(log, make_step(step_index=0, raw_response="b"))
+def test_steps_ordered_by_step_index(log):
+    for i in (2, 0, 1):
+        logger.log_step(log, make_step(step_index=i, raw_response=str(i)))
     got = logger.read_steps(log.db_path, "r1")
-    assert [(r["step_index"], r["raw_response"]) for r in got] == [(0, "a"), (0, "b"), (2, "café {\"tool\": \"x\"}")]
+    assert [(r["step_index"], r["raw_response"]) for r in got] == [(0, "0"), (1, "1"), (2, "2")]
+
+
+def test_duplicate_step_is_loud_and_not_appended(log):
+    logger.log_step(log, make_step())
+    with pytest.raises(ValueError, match="r1.*step_index 0"):
+        logger.log_step(log, make_step(raw_response="again"))
+    assert count(log.db_path, "steps") == 1
+    assert len(jsonl(os.path.join(log.out_dir, "steps.jsonl"))) == 1
 
 
 def assert_nothing_written(log):
@@ -170,7 +177,10 @@ def test_tool_event_round_trip(log):
 
 def test_tool_event_odd_payload_never_crashes(log):
     logger.log_tool_event(log, "r1", {"event": "x", "obj": {1, 2}})
-    assert logger.read_tool_events(log.db_path, "r1")[0]["obj"]
+    got = logger.read_tool_events(log.db_path, "r1")[0]
+    assert got["obj"] in ("{1, 2}", "{2, 1}")
+    with open(os.path.join(log.out_dir, "tool_events.jsonl"), encoding="utf-8") as f:
+        assert json.loads(f.readline())["obj"] == got["obj"]
 
 
 def test_tool_event_bad(log):
@@ -226,3 +236,98 @@ def test_batches_separate_and_ordered(log, tmp_path):
     logger.log_run(log, make_run("r1"))
     assert [r["run_id"] for r in logger.read_runs(log.db_path, "b1")] == ["r2", "r1"]
     assert [r["run_id"] for r in logger.read_runs(log.db_path, "b2")] == ["r9"]
+
+
+# ---- fix round 1: types, non-finite numbers, unencodable text ----
+
+@pytest.mark.parametrize("val", [float("nan"), float("inf"), float("-inf")])
+def test_non_finite_real_rejected(log, val):
+    with pytest.raises(ValueError, match="mean_logprob"):
+        logger.log_step(log, make_step(mean_logprob=val))
+    with pytest.raises(ValueError, match="temperature"):
+        logger.log_run(log, make_run(temperature=val))
+    assert_nothing_written(log)
+    assert count(log.db_path, "runs") == 0
+
+
+@pytest.mark.parametrize("over, col", [
+    ({"step_index": 1.0}, "step_index"), ({"step_index": "1"}, "step_index"),
+    ({"step_index": True}, "step_index"), ({"token_count": True}, "token_count"),
+    ({"latency_ms": "abc"}, "latency_ms"), ({"latency_ms": True}, "latency_ms"),
+    ({"tool_name": 5}, "tool_name"), ({"tool_result": b"ab"}, "tool_result"),
+    ({"repetition_index": 1.5}, "repetition_index"), ({"temperature": "0.1"}, "temperature"),
+    ({"model_name": 3}, "model_name"), ({"poison_ingested": None}, "poison_ingested"),
+])
+def test_step_wrong_types(log, over, col):
+    with pytest.raises(ValueError, match=col):
+        logger.log_step(log, make_step(**over))
+    assert_nothing_written(log)
+
+
+@pytest.mark.parametrize("over, col", [
+    ({"steps": 3.0}, "steps"), ({"parse_failures": True}, "parse_failures"),
+    ({"final_response": 7}, "final_response"), ({"started_at": b"x"}, "started_at"),
+])
+def test_run_wrong_types(log, over, col):
+    with pytest.raises(ValueError, match=col):
+        logger.log_run(log, make_run(**over))
+    assert count(log.db_path, "runs") == 0
+
+
+def test_real_given_as_int_is_float_in_both_stores(log):
+    logger.log_step(log, make_step(latency_ms=3, temperature=1))
+    got = logger.read_steps(log.db_path, "r1")[0]
+    line = jsonl(os.path.join(log.out_dir, "steps.jsonl"))[0]
+    for src in (got, line):
+        assert src["latency_ms"] == 3.0 and isinstance(src["latency_ms"], float)
+        assert isinstance(src["temperature"], float)
+    with open(os.path.join(log.out_dir, "steps.jsonl"), encoding="utf-8") as f:
+        assert '"latency_ms": 3.0' in f.read()
+
+
+def test_lone_surrogate_in_step_text(log):
+    logger.log_step(log, make_step(raw_response="a\ud800b", tool_name="t\udfffx"))
+    got = logger.read_steps(log.db_path, "r1")[0]
+    assert got["raw_response"] == "a\\ud800b"
+    assert got["tool_name"] == "t\\udfffx"
+    with open(os.path.join(log.out_dir, "steps.jsonl"), encoding="utf-8") as f:
+        line = json.loads(f.readline())
+    assert line == got
+
+
+def test_lone_surrogate_in_run_text(log):
+    logger.log_run(log, make_run(final_response="x\ud800"))
+    assert logger.read_runs(log.db_path, "b1")[0]["final_response"] == "x\\ud800"
+
+
+def test_lone_surrogate_in_tool_event(log):
+    logger.log_tool_event(log, "r1", {"event": "path_rejected", "filename": "a\ud800",
+                                      "nested": {"k\ud800": ["v\udc00", 1]}})
+    got = logger.read_tool_events(log.db_path, "r1")[0]
+    assert got["filename"] == "a\\ud800"
+    assert got["nested"] == {"k\\ud800": ["v\\udc00", 1]}
+    with open(os.path.join(log.out_dir, "tool_events.jsonl"), encoding="utf-8") as f:
+        line = json.loads(f.readline())
+    assert line["filename"] == got["filename"] and line["nested"] == got["nested"]
+
+
+def test_nul_and_newline_round_trip(log):
+    text = "a\x00b\nc\r\nd"
+    logger.log_step(log, make_step(raw_response=text))
+    logger.log_tool_event(log, "r1", {"event": "x", "v": text})
+    assert logger.read_steps(log.db_path, "r1")[0]["raw_response"] == text
+    assert logger.read_tool_events(log.db_path, "r1")[0]["v"] == text
+    assert jsonl(os.path.join(log.out_dir, "steps.jsonl"))[0]["raw_response"] == text
+
+
+def test_tool_event_non_finite_floats_become_strings(log):
+    logger.log_tool_event(log, "r1", {"event": "x", "a": float("nan"),
+                                      "b": [float("inf"), {"c": float("-inf")}], "d": 1.5})
+    got = logger.read_tool_events(log.db_path, "r1")[0]
+    assert (got["a"], got["b"], got["d"]) == ("nan", ["inf", {"c": "-inf"}], 1.5)
+    path = os.path.join(log.out_dir, "tool_events.jsonl")
+    with open(path, encoding="utf-8") as f:
+        raw = f.read()
+    assert "NaN" not in raw and "Infinity" not in raw
+    line = json.loads(raw)
+    assert line["a"] == "nan" and line["b"] == ["inf", {"c": "-inf"}]
