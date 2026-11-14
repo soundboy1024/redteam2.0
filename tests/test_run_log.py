@@ -72,7 +72,7 @@ def test_open_batch_creates_dir_and_tables(log):
 
 
 @pytest.mark.parametrize("bad", ["", "a/b", "a\\b", "..", "x..y", "C:x", "../up", "a b",
-                                 "a.b", "x" * 65, "con", "NUL", "Com1", "lpt9", None, 5])
+                                 "a.b", "x" * 65, "con", "NUL", "Com1", "lpt9", None, 5, "abc\n", "con\n"])
 def test_open_batch_rejects_bad_ids(tmp_path, bad):
     with pytest.raises(ValueError):
         logger.open_batch(str(tmp_path / "r.db"), str(tmp_path / "res"), bad)
@@ -309,6 +309,42 @@ def test_lone_surrogate_in_tool_event(log):
     with open(os.path.join(log.out_dir, "tool_events.jsonl"), encoding="utf-8") as f:
         line = json.loads(f.readline())
     assert line["filename"] == got["filename"] and line["nested"] == got["nested"]
+
+
+@pytest.mark.parametrize("val", [2 ** 70, -(2 ** 63) - 1, 2 ** 63])
+def test_int_outside_int64_rejected(log, val):
+    with pytest.raises(ValueError, match="token_count"):
+        logger.log_step(log, make_step(token_count=val))
+    with pytest.raises(ValueError, match="steps"):
+        logger.log_run(log, make_run(steps=val))
+    assert_nothing_written(log)
+    logger.log_step(log, make_step(token_count=2 ** 63 - 1))
+    assert logger.read_steps(log.db_path, "r1")[0]["token_count"] == 2 ** 63 - 1
+
+
+def test_circular_tool_event_detail_logs_with_marker(log):
+    loop = {"a": 1}
+    loop["self"] = loop
+    seq = [1]
+    seq.append(seq)
+    shared = {"s": 1}
+    logger.log_tool_event(log, "r1", {"event": "x", "loop": loop, "seq": seq,
+                                      "twice": [shared, shared]})
+    got = logger.read_tool_events(log.db_path, "r1")[0]
+    assert got["loop"] == {"a": 1, "self": "<circular>"}
+    assert got["seq"] == [1, "<circular>"]
+    assert got["twice"] == [{"s": 1}, {"s": 1}]
+    line = jsonl(os.path.join(log.out_dir, "tool_events.jsonl"))[0]
+    assert (line["loop"], line["seq"], line["twice"]) == (got["loop"], got["seq"], got["twice"])
+
+
+def test_too_deep_tool_event_detail_logs(log):
+    deep = cur = {}
+    for _ in range(5000):
+        cur["n"] = {}
+        cur = cur["n"]
+    logger.log_tool_event(log, "r1", {"event": "x", "deep": deep})
+    assert len(logger.read_tool_events(log.db_path, "r1")) == 1
 
 
 def test_nul_and_newline_round_trip(log):

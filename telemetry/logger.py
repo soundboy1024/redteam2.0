@@ -16,7 +16,10 @@ from telemetry.schema import (AGENT_STATES, BOOL_COLUMNS, DDL, INTEGER_COLUMNS,
                               REAL_COLUMNS, RUN_COLUMNS, RUN_STATUSES,
                               STEP_COLUMNS)
 
-BATCH_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
+INT64_MIN, INT64_MAX = -(2 ** 63), 2 ** 63 - 1
+MAX_DETAIL_DEPTH = 50
+CIRCULAR = "<circular>"
+BATCH_ID_RE = re.compile(r"[A-Za-z0-9_-]{1,64}")
 RESERVED_NAMES = {"CON", "PRN", "AUX", "NUL",
                   *(f"COM{i}" for i in range(1, 10)), *(f"LPT{i}" for i in range(1, 10))}
 
@@ -59,6 +62,8 @@ def _normalize(row: dict, columns: tuple) -> dict:
         elif col in INTEGER_COLUMNS:
             if isinstance(v, bool) or not isinstance(v, int):
                 raise ValueError(f"{col} must be an int or None, got {type(v).__name__}")
+            if not INT64_MIN <= v <= INT64_MAX:
+                raise ValueError(f"{col} is outside the signed 64-bit range: {v}")
         elif col in REAL_COLUMNS:
             if isinstance(v, bool) or not isinstance(v, (int, float)):
                 raise ValueError(f"{col} must be a number or None, got {type(v).__name__}")
@@ -106,23 +111,27 @@ def _db_values(row: dict, columns: tuple) -> list:
     return [int(row[c]) if c in BOOL_COLUMNS else row[c] for c in columns]
 
 
-def _sanitize_detail(v):
-    """Recursive: clean strings (keys too), turn non-finite floats into their repr."""
+def _sanitize_detail(v, _path=()):
+    """Recursive: clean strings (keys too), turn non-finite floats into their repr,
+    and replace a container that contains itself (or nests too deep) with a marker."""
     if isinstance(v, str):
         return _clean_text(v)
     if isinstance(v, float):
         return v if math.isfinite(v) else repr(v)
-    if isinstance(v, dict):
-        out = {}
-        for k, val in v.items():
-            if isinstance(k, str):
-                k = _clean_text(k)
-            elif not (k is None or isinstance(k, (bool, int))):
-                k = _clean_text(repr(k))
-            out[k] = _sanitize_detail(val)
-        return out
-    if isinstance(v, (list, tuple)):
-        return [_sanitize_detail(x) for x in v]
+    if isinstance(v, (dict, list, tuple)):
+        if id(v) in _path or len(_path) >= MAX_DETAIL_DEPTH:
+            return CIRCULAR
+        path = _path + (id(v),)
+        if isinstance(v, dict):
+            out = {}
+            for k, val in v.items():
+                if isinstance(k, str):
+                    k = _clean_text(k)
+                elif not (k is None or isinstance(k, (bool, int))):
+                    k = _clean_text(repr(k))
+                out[k] = _sanitize_detail(val, path)
+            return out
+        return [_sanitize_detail(x, path) for x in v]
     return v
 
 
@@ -141,11 +150,11 @@ def _insert(db_path: str, table: str, columns: tuple, values: list) -> None:
 
 def _append_line(path: str, obj: dict) -> None:
     with open(path, "a", encoding="utf-8", newline="\n") as f:
-        f.write(json.dumps(obj, ensure_ascii=False, default=repr) + "\n")
+        f.write(_dumps(obj) + "\n")
 
 
 def _bad_batch_id(batch_id) -> bool:
-    return (not isinstance(batch_id, str) or not BATCH_ID_RE.match(batch_id)
+    return (not isinstance(batch_id, str) or not BATCH_ID_RE.fullmatch(batch_id)
             or batch_id.upper() in RESERVED_NAMES)
 
 
