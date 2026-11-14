@@ -15,7 +15,7 @@ ROW_KEYS = {"step_index", "agent_state", "tool_name", "tool_args_json", "tool_ca
             "raw_response", "tool_result", "poison_ingested", "token_count", "latency_ms",
             "tokens_per_sec", "mean_logprob", "min_logprob", "std_logprob",
             "mean_entropy_approx", "max_entropy_approx", "entropy_spike_delta",
-            "tool_name_logprob"}
+            "tool_name_logprob", "parse_reason", "done_reason", "prompt_token_count"}
 TELEMETRY_KEYS = ("mean_logprob", "min_logprob", "std_logprob", "mean_entropy_approx",
                   "max_entropy_approx", "entropy_spike_delta", "tool_name_logprob")
 
@@ -120,9 +120,10 @@ def lp_for(content, logprob=-0.5, entropy_shift=0.0):
             for ch in content]
 
 
-def result(content, logprobs=None):
+def result(content, logprobs=None, done_reason="stop", prompt_token_count=40):
     return ChatResult(content=content, logprobs=logprobs, token_count=7, latency_ms=12.5,
-                      tokens_per_sec=56.0, done_reason="stop")
+                      tokens_per_sec=56.0, done_reason=done_reason,
+                      prompt_token_count=prompt_token_count)
 
 
 class Scripted:
@@ -485,3 +486,47 @@ def test_prompt_examples_are_not_real_fixture_paths():
                  '{"tool": "read_workspace_file", "args": {"filename": "notes/todo.txt"}}'):
         assert line in SYSTEM_PROMPT.splitlines()
         assert parse_reply(line).kind in ("tool", "final")
+
+
+# ---- final fix wave: parse_reason, done_reason, prompt_token_count ----
+
+def test_parse_reason_done_reason_prompt_tokens_on_rows(tmp_path):
+    replies = [result("no json here", done_reason="length", prompt_token_count=101),
+               result(LIST, prompt_token_count=150),
+               result(FINAL, prompt_token_count=None)]
+    _, rows, _ = go(make_ctx(tmp_path), replies)
+    assert [r["parse_reason"] for r in rows] == [None, "no JSON object found", None, None]
+    assert [r["done_reason"] for r in rows] == [None, "length", "stop", "stop"]
+    assert [r["prompt_token_count"] for r in rows] == [None, 101, 150, None]
+    assert rows[1]["parse_reason"] == parse_reply("no json here").reason
+
+
+def test_empty_done_reason_is_stored_as_none(tmp_path):
+    _, rows, _ = go(make_ctx(tmp_path), [result(FINAL, done_reason="")])
+    assert rows[1]["done_reason"] is None
+
+
+def test_harness_error_row_fills_the_three_keys(tmp_path, monkeypatch):
+    def unreachable(c, path, payload):
+        raise ListenerUnreachable("gone")
+    monkeypatch.setattr(agent_loop, "send_http_request", unreachable)
+    send = '{"tool": "send_http_request", "args": {"path": "/x", "payload": 1}}'
+    rows: list[dict] = []
+    with pytest.raises(ListenerUnreachable):
+        run_agent(Scripted([result(send, done_reason="stop", prompt_token_count=77)]),
+                  make_ctx(tmp_path), "p", [], 5, rows.append)
+    r = rows[1]
+    assert set(r) == ROW_KEYS and r["tool_result"].startswith("HARNESS_ERROR")
+    assert (r["parse_reason"], r["done_reason"], r["prompt_token_count"]) == (None, "stop", 77)
+
+
+def test_parse_failure_harness_error_row_keeps_parse_reason(tmp_path, monkeypatch):
+    def bad(logprobs):
+        raise ValueError("bad logprobs")
+    monkeypatch.setattr(agent_loop, "summarise", bad)
+    rows: list[dict] = []
+    with pytest.raises(ValueError):
+        run_agent(Scripted([result("garbage", done_reason="length")]), make_ctx(tmp_path),
+                  "p", [], 5, rows.append)
+    assert rows[1]["parse_reason"] == "no JSON object found"
+    assert rows[1]["done_reason"] == "length"

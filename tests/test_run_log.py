@@ -13,7 +13,8 @@ STEP_KEYS = ("step_index", "agent_state", "tool_name", "tool_args_json",
              "tool_call_parse_failed", "raw_response", "tool_result",
              "poison_ingested", "token_count", "latency_ms", "tokens_per_sec",
              "mean_logprob", "min_logprob", "std_logprob", "mean_entropy_approx",
-             "max_entropy_approx", "entropy_spike_delta", "tool_name_logprob")
+             "max_entropy_approx", "entropy_spike_delta", "tool_name_logprob",
+             "parse_reason", "done_reason", "prompt_token_count")
 
 
 def make_step(run_id="r1", **over):
@@ -27,7 +28,8 @@ def make_step(run_id="r1", **over):
            "tokens_per_sec": None, "mean_logprob": -0.5, "min_logprob": None,
            "std_logprob": None, "mean_entropy_approx": None,
            "max_entropy_approx": None, "entropy_spike_delta": None,
-           "tool_name_logprob": None}
+           "tool_name_logprob": None, "parse_reason": None, "done_reason": "stop",
+           "prompt_token_count": 55}
     row.update(over)
     return row
 
@@ -265,6 +267,10 @@ def test_non_finite_real_rejected(log, val):
     ({"tool_name": 5}, "tool_name"), ({"tool_result": b"ab"}, "tool_result"),
     ({"repetition_index": 1.5}, "repetition_index"), ({"temperature": "0.1"}, "temperature"),
     ({"model_name": 3}, "model_name"), ({"poison_ingested": None}, "poison_ingested"),
+    ({"parse_reason": 1}, "parse_reason"), ({"done_reason": b"stop"}, "done_reason"),
+    ({"prompt_token_count": 1.0}, "prompt_token_count"),
+    ({"prompt_token_count": True}, "prompt_token_count"),
+    ({"prompt_token_count": "5"}, "prompt_token_count"),
 ])
 def test_step_wrong_types(log, over, col):
     with pytest.raises(ValueError, match=col):
@@ -375,3 +381,69 @@ def test_tool_event_non_finite_floats_become_strings(log):
     assert "NaN" not in raw and "Infinity" not in raw
     line = json.loads(raw)
     assert line["a"] == "nan" and line["b"] == ["inf", {"c": "-inf"}]
+
+
+# ---- final fix wave: new step columns, schema version, runs index ----
+
+def test_new_step_columns_round_trip(log):
+    row = make_step(agent_state="PARSE_FAILURE", tool_call_parse_failed=True,
+                    parse_reason="no JSON object found", done_reason="length",
+                    prompt_token_count=1234)
+    logger.log_step(log, row)
+    assert logger.read_steps(log.db_path, "r1") == [row]
+    assert jsonl(os.path.join(log.out_dir, "steps.jsonl")) == [row]
+
+
+def test_new_step_column_sql_types():
+    from telemetry.schema import sql_type
+    assert [sql_type(c) for c in ("parse_reason", "done_reason", "prompt_token_count")] == [
+        "TEXT", "TEXT", "INTEGER"]
+    assert STEP_COLUMNS[-3:] == ("parse_reason", "done_reason", "prompt_token_count")
+
+
+def user_version(db):
+    with closing(sqlite3.connect(db)) as conn:
+        return conn.execute("PRAGMA user_version").fetchone()[0]
+
+
+def test_new_database_gets_schema_version(log):
+    from telemetry.schema import SCHEMA_VERSION
+    assert SCHEMA_VERSION == 2
+    assert user_version(log.db_path) == 2
+
+
+def test_reopen_same_version_is_fine(log, tmp_path):
+    logger.open_batch(log.db_path, str(tmp_path / "results"), "b2")
+    assert user_version(log.db_path) == 2
+
+
+def _old_db(path):
+    with closing(sqlite3.connect(path)) as conn:
+        with conn:
+            conn.execute("CREATE TABLE steps (id INTEGER PRIMARY KEY, run_id TEXT)")
+
+
+def test_existing_older_database_is_refused(tmp_path):
+    db = str(tmp_path / "old.db")
+    _old_db(db)
+    with pytest.raises(ValueError, match="older schema") as e:
+        logger.open_batch(db, str(tmp_path / "results"), "b1")
+    assert "old.db" in str(e.value) and "moved aside" in str(e.value)
+    assert not os.path.exists(tmp_path / "results" / "b1")
+    assert user_version(db) == 0
+
+
+def test_existing_database_with_other_version_is_refused(tmp_path):
+    db = str(tmp_path / "v9.db")
+    with closing(sqlite3.connect(db)) as conn:
+        conn.execute("PRAGMA user_version = 9")
+    with pytest.raises(ValueError, match="schema"):
+        logger.open_batch(db, str(tmp_path / "results"), "b1")
+
+
+def test_runs_batch_id_index_exists(log):
+    with closing(sqlite3.connect(log.db_path)) as conn:
+        rows = conn.execute("PRAGMA index_list(runs)").fetchall()
+        names = [r[1] for r in rows]
+        cols = {n: [c[2] for c in conn.execute(f"PRAGMA index_info({n})")] for n in names}
+    assert ["batch_id"] in cols.values()

@@ -14,7 +14,7 @@ from datetime import datetime, timezone
 
 from telemetry.schema import (AGENT_STATES, BOOL_COLUMNS, DDL, INTEGER_COLUMNS,
                               REAL_COLUMNS, RUN_COLUMNS, RUN_STATUSES,
-                              STEP_COLUMNS)
+                              SCHEMA_VERSION, STEP_COLUMNS)
 
 INT64_MIN, INT64_MAX = -(2 ** 63), 2 ** 63 - 1
 MAX_DETAIL_DEPTH = 50
@@ -165,17 +165,32 @@ def open_batch(db_path: str, results_dir: str, batch_id: str) -> BatchLog:
     out_dir = os.path.join(results_dir, batch_id)
     if os.path.exists(out_dir):
         raise ValueError(f"batch folder {out_dir} already exists; use a new batch_id")
-    os.makedirs(out_dir)
-    for name in JSONL_FILES:  # always present, so a missing file means a lost write
-        open(os.path.join(out_dir, name), "x", encoding="utf-8").close()
     parent = os.path.dirname(db_path)
     if parent:
         os.makedirs(parent, exist_ok=True)
+    _prepare_db(db_path)  # before the folder, so a refused database leaves nothing behind
+    os.makedirs(out_dir)
+    for name in JSONL_FILES:  # always present, so a missing file means a lost write
+        open(os.path.join(out_dir, name), "x", encoding="utf-8").close()
+    return BatchLog(batch_id=batch_id, db_path=db_path, out_dir=out_dir)
+
+
+def _prepare_db(db_path: str) -> None:
+    """New database: create the tables and stamp SCHEMA_VERSION. Existing database:
+    refuse it unless it carries SCHEMA_VERSION. No migration."""
     with closing(sqlite3.connect(db_path)) as conn:
+        version = conn.execute("PRAGMA user_version").fetchone()[0]
+        has_tables = conn.execute(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table'").fetchone()[0] > 0
+        if version != SCHEMA_VERSION and (version != 0 or has_tables):
+            raise ValueError(
+                f"the run log at {db_path} was written by an older schema (user_version "
+                f"{version}, expected {SCHEMA_VERSION}) and should be moved aside "
+                "before running again")
         with conn:
             for statement in DDL:
                 conn.execute(statement)
-    return BatchLog(batch_id=batch_id, db_path=db_path, out_dir=out_dir)
+            conn.execute(f"PRAGMA user_version = {int(SCHEMA_VERSION)}")
 
 
 def log_step(log: BatchLog, row: dict) -> None:

@@ -31,21 +31,3 @@ def summarise(logprobs: list[dict] | None) -> dict:
         "max_entropy_approx": max(ents),
     }
 
-
-def logprob_at_text(logprobs: list[dict], content: str, needle: str) -> float | None:
-    """Logprob of the first token overlapping the first occurrence of needle, else None."""
-    if not needle:
-        return None
-    concat = "".join(e["token"] for e in logprobs)
-    # Some runtimes trim whitespace, so token text may differ from content.
-    text = content if concat == content else concat
-    start = text.find(needle)
-    if start < 0:
-        return None
-    pos = 0
-    for e in logprobs:
-        end = pos + len(e["token"])
-        if pos <= start < end:
-            return e["logprob"]
-        pos = end
-    return None

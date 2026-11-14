@@ -226,6 +226,10 @@ def _step_lines(steps: list[dict]) -> list[str]:
             lines += ["", POISON_MARK]
         if s["tool_call_parse_failed"]:
             lines += ["", "tool_call_parse_failed: True"]
+            if s.get("parse_reason") is not None:
+                lines += ["", f"parse_reason: {_inline(s['parse_reason'])}"]
+        if s.get("done_reason") not in (None, "stop"):
+            lines += ["", f"done_reason: {_inline(s['done_reason'])}"]
         lines += ["", "Raw reply:", "", _code(s["raw_response"])]
         if s["tool_name"] is not None or s["tool_args_json"] is not None:
             lines += ["", "Parsed tool call:", "",

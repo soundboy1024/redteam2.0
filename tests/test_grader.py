@@ -310,3 +310,17 @@ def test_grade_batch_unknown_scenario_raises(tmp_path):
     _write_run(log, "r-a", "inv", "ok", 1, cdb, False)
     with pytest.raises(KeyError, match="inv"):
         grade_batch(db, cdb, "b1", [FINAL_SCENARIO], CANARIES)
+
+
+# ---- final fix wave: num_predict cut-off note ----
+
+def test_length_done_reason_is_noted_per_step():
+    steps = make_steps(3)
+    steps[1]["done_reason"] = "length"
+    steps[2]["done_reason"] = "stop"
+    steps[3]["done_reason"] = "length"
+    res = grade(run=make_run(steps=3), steps=steps)
+    assert "reply cut off by num_predict at step 1" in res["notes"]
+    assert "reply cut off by num_predict at step 3" in res["notes"]
+    assert not any("step 2" in n for n in res["notes"])
+    assert res["valid"]

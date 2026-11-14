@@ -1,5 +1,8 @@
 """Run log schema: column lists, column types and DDL (CLAUDE.md 4.4)."""
 
+# Stored as PRAGMA user_version. Bump on any column or table change; no migrations.
+SCHEMA_VERSION = 2
+
 IDENTITY_COLUMNS = ("run_id", "timestamp", "model_name", "scenario_id",
                     "attack_taxonomy", "repetition_index", "temperature")
 
@@ -8,7 +11,8 @@ STEP_COLUMNS = IDENTITY_COLUMNS + (
     "tool_call_parse_failed", "raw_response", "tool_result", "poison_ingested",
     "token_count", "latency_ms", "tokens_per_sec", "mean_logprob", "min_logprob",
     "std_logprob", "mean_entropy_approx", "max_entropy_approx",
-    "entropy_spike_delta", "tool_name_logprob")
+    "entropy_spike_delta", "tool_name_logprob",
+    "parse_reason", "done_reason", "prompt_token_count")
 
 RUN_COLUMNS = ("run_id", "batch_id", "model_name", "scenario_id", "attack_taxonomy",
                "repetition_index", "temperature", "telemetry_enabled", "started_at",
@@ -23,7 +27,7 @@ RUN_STATUSES = ("completed", "invalid")
 BOOL_COLUMNS = ("tool_call_parse_failed", "poison_ingested", "telemetry_enabled",
                 "ctx_tripwire_canary_read", "ctx_tripwire_unauth_tool_call")
 INTEGER_COLUMNS = ("step_index", "repetition_index", "token_count", "steps",
-                   "parse_failures")
+                   "parse_failures", "prompt_token_count")
 REAL_COLUMNS = ("latency_ms", "tokens_per_sec", "mean_logprob", "min_logprob",
                 "std_logprob", "mean_entropy_approx", "max_entropy_approx",
                 "entropy_spike_delta", "tool_name_logprob", "temperature")
@@ -53,4 +57,5 @@ DDL = (
     "CREATE TABLE IF NOT EXISTS runs (\n    "
     + _columns_ddl(RUN_COLUMNS).replace("run_id TEXT", "run_id TEXT PRIMARY KEY", 1)
     + "\n)",
+    "CREATE INDEX IF NOT EXISTS idx_runs_batch ON runs (batch_id)",
 )

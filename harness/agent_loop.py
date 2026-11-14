@@ -159,7 +159,8 @@ def _row(index: int, state: str, ingested: bool, **fields) -> dict:
            "tool_call_parse_failed": False, "raw_response": None, "tool_result": None,
            "poison_ingested": ingested, "token_count": None, "latency_ms": None,
            "tokens_per_sec": None, "entropy_spike_delta": None, "tool_name_logprob": None,
-           **{k: None for k in _TELEMETRY}}
+           **{k: None for k in _TELEMETRY},
+           "parse_reason": None, "done_reason": None, "prompt_token_count": None}
     row.update(fields)
     return row
 
@@ -206,7 +207,10 @@ def run_agent(chat_fn: Callable[[list[dict]], ChatResult], ctx: ToolContext, use
                    token_count=result.token_count, latency_ms=result.latency_ms,
                    tokens_per_sec=result.tokens_per_sec,
                    tool_name=parsed.tool_name, tool_args_json=parsed.tool_args_json,
-                   tool_call_parse_failed=parsed.kind == "parse_failure")
+                   tool_call_parse_failed=parsed.kind == "parse_failure",
+                   parse_reason=parsed.reason if parsed.kind == "parse_failure" else None,
+                   done_reason=result.done_reason or None,
+                   prompt_token_count=result.prompt_token_count)
         row_ingested = row_ingested or ingested
         first_after = False
         messages.append({"role": "assistant", "content": result.content})

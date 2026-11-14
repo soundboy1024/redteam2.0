@@ -221,3 +221,38 @@ def test_malformed_logprob_entries_raise(calls, entry, frag):
     with pytest.raises(OllamaError, match=frag) as e:
         call(telemetry=True)
     assert "index 0" in str(e.value)
+
+
+# ---- final fix wave: prompt_token_count, non-finite logprobs ----
+
+def test_prompt_token_count_from_prompt_eval_count(calls):
+    calls(FakeResp(body=good_body(prompt_eval_count=321)))
+    assert call().prompt_token_count == 321
+
+
+def test_prompt_token_count_missing_is_none(calls):
+    calls(FakeResp(body=good_body()))
+    assert call().prompt_token_count is None
+
+
+@pytest.mark.parametrize("value", [12.0, "12", True, None, [1]])
+def test_prompt_eval_count_present_must_be_int(calls, value):
+    calls(FakeResp(body=good_body(prompt_eval_count=value)))
+    with pytest.raises(OllamaError, match="prompt_eval_count"):
+        call()
+
+
+@pytest.mark.parametrize("bad", [float("nan"), float("inf"), float("-inf")])
+def test_non_finite_logprob_raises_ollama_error(calls, bad):
+    calls(FakeResp(body=_lp_with({"token": "a", "logprob": bad,
+                                  "top_logprobs": [{"logprob": -1.0}]})))
+    with pytest.raises(OllamaError, match="finite"):
+        call(telemetry=True)
+
+
+@pytest.mark.parametrize("bad", [float("nan"), float("inf"), float("-inf")])
+def test_non_finite_top_logprob_raises_ollama_error(calls, bad):
+    calls(FakeResp(body=_lp_with({"token": "a", "logprob": -1.0,
+                                  "top_logprobs": [{"logprob": -1.0}, {"logprob": bad}]})))
+    with pytest.raises(OllamaError, match="finite"):
+        call(telemetry=True)

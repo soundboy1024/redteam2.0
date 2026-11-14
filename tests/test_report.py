@@ -240,3 +240,26 @@ def test_write_failure_leaves_nothing(tmp_path, monkeypatch):
     with pytest.raises(OSError):
         write_results_json(str(tmp_path), META, eight())
     assert os.listdir(tmp_path) == []
+
+
+# ---- final fix wave: parse_reason and done_reason in transcripts ----
+
+def test_transcript_shows_parse_reason_and_non_stop_done_reason(tmp_path):
+    steps = steps_for(["a", "b", "c"])
+    steps[0].update(done_reason=None, parse_reason=None)
+    steps[1].update(agent_state="PARSE_FAILURE", tool_call_parse_failed=True,
+                    parse_reason="invalid JSON: Expecting ',' delimiter", done_reason="length")
+    steps[2].update(done_reason="stop", parse_reason=None)
+    res = make("run-5", "m1", "benign_control", "completed_clean")
+    text = read(write_transcript_md(str(tmp_path), res, steps, [], []))
+    assert "parse_reason: invalid JSON: Expecting ',' delimiter" in text
+    assert text.count("done_reason:") == 1 and "done_reason: length" in text
+    assert "parse_reason:" not in text.split("### Step 2")[1]
+
+
+def test_transcript_parse_reason_is_inline_safe(tmp_path):
+    steps = steps_for(["a", "b"])
+    steps[1].update(tool_call_parse_failed=True, parse_reason=EVIL, done_reason="stop")
+    res = make("run-6", "m1", "benign_control", "completed_clean")
+    text = read(write_transcript_md(str(tmp_path), res, steps, [], []))
+    assert not any(line.startswith("## Forged") for line in text.splitlines())

@@ -2,6 +2,7 @@
 
 Must not import from traps/ or telemetry/. Every failure raises OllamaError.
 """
+import math
 import urllib.parse
 from dataclasses import dataclass
 
@@ -28,6 +29,7 @@ class ChatResult:
     latency_ms: float
     tokens_per_sec: float | None
     done_reason: str
+    prompt_token_count: int | None = None  # Ollama's prompt_eval_count; None if absent
 
 
 def _check_host(host: str) -> None:
@@ -47,6 +49,10 @@ def _is_number(v) -> bool:
     return isinstance(v, (int, float)) and not isinstance(v, bool)
 
 
+def _is_finite_number(v) -> bool:
+    return _is_number(v) and math.isfinite(v)
+
+
 def _validate_logprobs(logprobs, raw: str) -> None:
     for i, e in enumerate(logprobs):
         problem = None
@@ -56,12 +62,16 @@ def _validate_logprobs(logprobs, raw: str) -> None:
             problem = "missing string token"
         elif not _is_number(e.get("logprob")):
             problem = "missing numeric logprob"
+        elif not math.isfinite(e["logprob"]):
+            problem = f"logprob is not finite ({e['logprob']!r})"
         else:
             top = e.get("top_logprobs")
             if not isinstance(top, list) or not top:
                 problem = "top_logprobs missing or empty"
             elif not all(isinstance(t, dict) and _is_number(t.get("logprob")) for t in top):
                 problem = "top_logprobs entry lacks numeric logprob"
+            elif not all(_is_finite_number(t["logprob"]) for t in top):
+                problem = "top_logprobs entry logprob is not finite"
         if problem:
             raise OllamaError(f"malformed logprobs at index {i}: {problem}: {_snippet(raw)}")
 
@@ -104,6 +114,11 @@ def chat(host: str, model: str, messages: list[dict], *, temperature: float, see
         if isinstance(v, bool) or not ok:
             raise OllamaError(f"ollama response has bad timing field {field}={v!r}: "
                               f"{_snippet(resp.text)}")
+    prompt_tokens = data.get("prompt_eval_count")
+    if "prompt_eval_count" in data and (isinstance(prompt_tokens, bool)
+                                        or not isinstance(prompt_tokens, int)):
+        raise OllamaError(f"ollama response has bad prompt_eval_count={prompt_tokens!r}: "
+                          f"{_snippet(resp.text)}")
     logprobs = None
     if telemetry:
         logprobs = data.get("logprobs")
@@ -120,4 +135,5 @@ def chat(host: str, model: str, messages: list[dict], *, temperature: float, see
         latency_ms=data["total_duration"] / 1e6,
         tokens_per_sec=tps,
         done_reason=str(data.get("done_reason", "")),
+        prompt_token_count=prompt_tokens,
     )
