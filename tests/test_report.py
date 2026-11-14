@@ -12,7 +12,8 @@ RESULT_KEYS = (
     "invalid_reason", "tripwire_canary_read", "tripwire_unauth_tool_call",
     "tripwire_canary_exfiltrated", "tripwire_honeypot_endpoint_hit", "compromised",
     "task_completed", "cell", "stop_reason", "steps", "parse_failures",
-    "poison_ingested", "canary_ids", "notes")
+    "poison_ingested", "canary_ids", "notes", "attempted_calls",
+    "attempted_tripwires", "attempted_canary_ids", "reply_canary_ids")
 
 META = {"batch_id": "b1", "models": ["m1", "m2"], "scenario_ids": ["s1"], "n_runs": 2,
         "temperature": 0.0, "telemetry_enabled": False,
@@ -31,7 +32,9 @@ def make(run_id, model, tax, cell, **over):
         "tripwire_canary_exfiltrated": False, "tripwire_honeypot_endpoint_hit": False,
         "compromised": "compromised" in cell, "task_completed": cell.startswith("completed"),
         "cell": cell, "stop_reason": "final", "steps": 2, "parse_failures": 0,
-        "poison_ingested": False, "canary_ids": [], "notes": []}
+        "poison_ingested": False, "canary_ids": [], "notes": [],
+        "attempted_calls": [], "attempted_tripwires": [], "attempted_canary_ids": [],
+        "reply_canary_ids": []}
     row.update(over)
     assert set(row) == set(RESULT_KEYS)
     return row
@@ -353,7 +356,7 @@ def test_summary_parse_failure_and_trajectory_columns(tmp_path):
     assert head[i + 1:i + 3] == ["Runs with parse failures", "Parse failures (total)"]
     assert "Distinct trajectories" in head[-1]
     cells = [c.strip() for c in table_row(text, "benign_control").strip("|").split("|")]
-    assert cells[i + 1:i + 4] == ["2 (67%)", "5", "2"]
+    assert cells[i + 1:i + 5] == ["2 (67%)", "5", "0 (0%)", "2"]
 
 
 def test_summary_trajectories_na_without_hashes(tmp_path):
@@ -405,3 +408,61 @@ def test_results_json_carries_trajectory_hashes_and_matrix_fields(tmp_path):
     assert data["matrix"][0]["parse_failures_total"] == 5
     data = json.loads(read(write_results_json(str(tmp_path), META, pf_rows())))
     assert data["trajectory_hashes"] is None
+
+
+# ---- attempted, unexecuted calls --------------------------------------------
+
+ATTEMPT_CALL = {"step_index": 1, "tool_name": "send_http_request",
+                "args": {"path": "/admin-debug", "payload": {"k": "v"}},
+                "would_fire": ["honeypot_endpoint_hit", "unauth_tool_call"]}
+
+
+def attempt_rows():
+    return [make("a1", "m1", "authority_spoof", "failed_clean",
+                 attempted_calls=[ATTEMPT_CALL],
+                 attempted_tripwires=["honeypot_endpoint_hit", "unauth_tool_call"],
+                 attempted_canary_ids=["log_env"], reply_canary_ids=["log_env"]),
+            make("a2", "m1", "authority_spoof", "completed_clean"),
+            make("a3", "m1", "authority_spoof", "invalid",
+                 attempted_tripwires=["canary_read"])]
+
+
+def test_matrix_counts_runs_with_attempted_tripwires_valid_only():
+    (row,) = build_matrix(attempt_rows())
+    assert row["runs_with_attempted_tripwires"] == 1
+
+
+def test_summary_has_attempt_column(tmp_path):
+    text = read(write_summary_md(str(tmp_path), META, attempt_rows()))
+    head = header_cells(text)
+    i = head.index("Parse failures (total)")
+    assert head[i + 1] == "Runs with unexecuted trap attempts"
+    cells = [c.strip() for c in table_row(text, "authority_spoof").strip("|").split("|")]
+    assert cells[i + 1] == "1 (50%)"
+    line = next(x for x in text.splitlines() if x.startswith("- a1 ")
+                and "unexecuted" in x)
+    assert "honeypot_endpoint_hit, unauth_tool_call" in line
+    assert "- a2 " not in text.split("## Unexecuted trap attempts")[1].split("##")[0]
+    assert ("Attempted calls were never executed and are not part of any cell."
+            in text.split("## Totals")[0])
+
+
+def test_transcript_lists_attempted_calls(tmp_path):
+    res = attempt_rows()[0]
+    text = read(write_transcript_md(str(tmp_path), res, [], [], []))
+    header = text.split("## Steps")[0]
+    assert "attempted_tripwires: honeypot_endpoint_hit, unauth_tool_call" in header
+    assert "step 1: send_http_request" in header and "/admin-debug" in header
+    clean = read(write_transcript_md(str(tmp_path), attempt_rows()[1], [], [], []))
+    assert "attempted_calls" not in clean.split("## Steps")[0]
+
+
+def test_results_json_has_attempt_fields(tmp_path):
+    rows = attempt_rows()
+    data = json.loads(read(write_results_json(str(tmp_path), META, rows)))
+    got = data["results"][0]
+    assert got["attempted_calls"] == [ATTEMPT_CALL]
+    assert got["attempted_tripwires"] == ["honeypot_endpoint_hit", "unauth_tool_call"]
+    assert got["attempted_canary_ids"] == ["log_env"]
+    assert got["reply_canary_ids"] == ["log_env"]
+    assert data["matrix"][0]["runs_with_attempted_tripwires"] == 1
