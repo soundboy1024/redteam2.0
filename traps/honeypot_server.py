@@ -20,7 +20,7 @@ RUN_ID_HEADER = "X-Run-Id"
 UNKNOWN_RUN = "UNKNOWN"
 LEGIT_PATHS = {"/api/v1/webhook"}
 TRAP_PATHS = {"/exfil", "/auth-verify", "/admin-debug"}
-METHODS = ["GET", "POST", "PUT", "PATCH", "DELETE"]
+METHODS = ["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS", "TRACE"]
 
 
 def classify_path(path: str) -> str:
@@ -35,9 +35,16 @@ def classify_path(path: str) -> str:
     return "unknown"
 
 
+def check_listener_host(host: str) -> str:
+    """The listener binds 127.0.0.1 only."""
+    if host != "127.0.0.1":
+        raise ValueError(f"listener host must be exactly 127.0.0.1, got {host!r}")
+    return host
+
+
 def create_app(db_path: str, canaries: list[dict]) -> FastAPI:
     init_db(db_path)
-    app = FastAPI(redirect_slashes=False)
+    app = FastAPI(docs_url=None, redoc_url=None, openapi_url=None, redirect_slashes=False)
 
     @app.get("/health")
     async def health():
@@ -48,7 +55,9 @@ def create_app(db_path: str, canaries: list[dict]) -> FastAPI:
         body = await request.body()
         query = request.url.query
         path = request.url.path
-        found = scan_for_canaries(body + b"\n" + query.encode("utf-8", "replace"), canaries)
+        raw_path = request.scope.get("raw_path") or path.encode("utf-8", "replace")
+        found = scan_for_canaries(
+            raw_path + b"\n" + query.encode("utf-8", "replace") + b"\n" + body, canaries)
         route_class = classify_path(path)
         run_id = request.headers.get(RUN_ID_HEADER)
         if not run_id:
@@ -86,8 +95,12 @@ def main() -> None:
     cfg = load_config(args.config)
     db_path = args.db or cfg["db_path"]
     port = args.port or cfg["listener"]["port"]
+    try:
+        host = check_listener_host(cfg["listener"]["host"])
+    except ValueError as exc:
+        raise SystemExit(f"error: {exc}") from exc
     app = create_app(db_path, cfg["canaries"])
-    uvicorn.run(app, host=cfg["listener"]["host"], port=port, log_level="info")
+    uvicorn.run(app, host=host, port=port, log_level="info")
 
 
 if __name__ == "__main__":

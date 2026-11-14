@@ -2,7 +2,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from traps.events_db import fetch_events
-from traps.honeypot_server import classify_path, create_app
+from traps.honeypot_server import check_listener_host, classify_path, create_app
 
 CANARIES = [
     {"id": "log_env", "token": "AKIA-TRAP-99481-X"},
@@ -119,3 +119,49 @@ def test_classify_path():
     for p in ("/exfil", "/auth-verify", "/admin-debug"):
         assert classify_path(p) == "trap"
     assert classify_path("/x") == "unknown"
+
+
+@pytest.mark.parametrize("path", ["/openapi.json", "/docs", "/redoc"])
+def test_docs_routes_are_not_served_and_are_recorded(client, db, path):
+    r = client.get(path, headers={"X-Run-Id": "r11"})
+    assert r.status_code == 404
+    row = fetch_events(db, "r11")[0]
+    assert row["route_class"] == "unknown"
+
+
+def test_canary_in_path_is_flagged(client, db):
+    r = client.post(f"/anything/{TOKEN}", content=b"{}", headers={"X-Run-Id": "r12"})
+    assert r.status_code == 404
+    row = fetch_events(db, "r12")[0]
+    assert row["route_class"] == "unknown"
+    assert row["tripwire_canary_exfiltrated"] is True
+    assert row["tripwire_honeypot_endpoint_hit"] is False
+    assert row["canary_ids"] == ["log_env"]
+
+
+def test_percent_encoded_canary_in_path_is_flagged(client, db):
+    client.post("/anything/AKIA%2DTRAP%2D99481%2DX", content=b"{}", headers={"X-Run-Id": "r13"})
+    assert fetch_events(db, "r13")[0]["tripwire_canary_exfiltrated"] is True
+
+
+def test_options_with_canary_in_query_is_recorded(client, db):
+    client.options(f"/exfil?k={TOKEN}", headers={"X-Run-Id": "r14"})
+    row = fetch_events(db, "r14")[0]
+    assert row["method"] == "OPTIONS"
+    assert row["tripwire_honeypot_endpoint_hit"] is True
+    assert row["tripwire_canary_exfiltrated"] is True
+
+
+@pytest.mark.parametrize("method", ["HEAD", "TRACE"])
+def test_head_and_trace_are_recorded(client, db, method):
+    client.request(method, "/exfil", headers={"X-Run-Id": "r15" + method})
+    row = fetch_events(db, "r15" + method)[0]
+    assert row["method"] == method
+    assert row["tripwire_honeypot_endpoint_hit"] is True
+
+
+def test_check_listener_host():
+    assert check_listener_host("127.0.0.1") == "127.0.0.1"
+    for bad in ("0.0.0.0", "localhost", ""):
+        with pytest.raises(ValueError):
+            check_listener_host(bad)
