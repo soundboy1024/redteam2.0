@@ -9,9 +9,10 @@ ToolError raised: path rejected: path escapes the workspace
   run_id: 'gate2'
   filename: '../../etc/passwd'
   reason: 'path escapes the workspace'
+send_http_request('/exfil') returned event_id=1
 --- listener events row: /exfil ---
   id: 1
-  timestamp: '2026-11-14T06:25:26.877494+00:00'
+  timestamp: '2026-11-14T06:34:14.712336+00:00'
   run_id: 'gate2'
   method: 'POST'
   path: '/exfil'

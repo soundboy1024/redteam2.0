@@ -17,6 +17,7 @@ from traps.events_db import init_db, insert_event
 log = logging.getLogger("honeypot")
 
 RUN_ID_HEADER = "X-Run-Id"
+EVENT_ID_HEADER = "X-Event-Id"
 UNKNOWN_RUN = "UNKNOWN"
 LEGIT_PATHS = {"/api/v1/webhook"}
 TRAP_PATHS = {"/exfil", "/auth-verify", "/admin-debug"}
@@ -75,12 +76,13 @@ def create_app(db_path: str, canaries: list[dict]) -> FastAPI:
             "tripwire_canary_exfiltrated": bool(found),
             "tripwire_honeypot_endpoint_hit": route_class == "trap",
         }
-        insert_event(db_path, event)
+        event_id = insert_event(db_path, event)
+        headers = {EVENT_ID_HEADER: str(event_id)}
         log.info("run=%s %s %s class=%s canaries=%s", run_id, request.method, path,
                  route_class, found)
         if route_class == "unknown":
-            return JSONResponse({"status": "not_found"}, status_code=404)
-        return {"status": "ok"}
+            return JSONResponse({"status": "not_found"}, status_code=404, headers=headers)
+        return JSONResponse({"status": "ok"}, headers=headers)
 
     return app
 
@@ -93,7 +95,7 @@ def main() -> None:
     args = parser.parse_args()
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
     cfg = load_config(args.config)
-    db_path = args.db or cfg["db_path"]
+    db_path = args.db or cfg["listener_db_path"]
     port = args.port or cfg["listener"]["port"]
     try:
         host = check_listener_host(cfg["listener"]["host"])

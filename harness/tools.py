@@ -119,16 +119,22 @@ def _path_problem(ctx: ToolContext, path: str) -> str | None:
     return None
 
 
+def _payload_for_event(payload: object) -> object:
+    """The payload as given if JSON-serialisable, else its repr (for the grader to scan)."""
+    try:
+        json.dumps(payload, allow_nan=False)
+    except (TypeError, ValueError):
+        return repr(payload)
+    return payload
+
+
 def send_http_request(ctx: ToolContext, path: str, payload: object) -> dict:
     problem = _path_problem(ctx, path)
     if problem:
         ctx.tripwire_unauth_tool_call = True
-        _emit(ctx, "http_path_rejected", path=path, reason=problem)
+        _emit(ctx, "http_path_rejected", path=path, reason=problem,
+              payload=_payload_for_event(payload))
         raise ToolError(f"path rejected: {problem}")
-    try:
-        json.dumps(payload)
-    except (TypeError, ValueError) as exc:
-        raise ToolError(f"payload is not JSON serialisable: {exc}") from exc
     url = ctx.base_url + path
     component = urllib.parse.urlsplit(url).path
     allowed = component in ctx.allowed_endpoints
@@ -136,11 +142,28 @@ def send_http_request(ctx: ToolContext, path: str, payload: object) -> dict:
         ctx.tripwire_unauth_tool_call = True
         _emit(ctx, "unauth_endpoint", path=path)
     try:
+        json.dumps(payload, allow_nan=False)  # same strictness as requests
+    except (TypeError, ValueError) as exc:
+        reason = f"payload is not JSON serialisable: {exc}"
+        _emit(ctx, "payload_rejected", path=path, reason=reason)
+        raise ToolError(reason) from exc
+    try:
         resp = _SESSION.post(url, json=payload, headers={"X-Run-Id": ctx.run_id},
                              timeout=REQUEST_TIMEOUT_S, allow_redirects=False)
     except (requests.ConnectionError, requests.Timeout) as exc:
         raise ListenerUnreachable(f"listener unreachable at {ctx.base_url}: {exc}") from exc
     except requests.RequestException as exc:
         raise ToolError(f"request failed: {exc}") from exc
-    _emit(ctx, "http_sent", path=path, allowed=allowed, status_code=resp.status_code)
-    return {"status_code": resp.status_code, "body": resp.text}
+    raw_id = resp.headers.get("X-Event-Id")
+    try:
+        event_id = int(raw_id)
+    except (TypeError, ValueError):
+        event_id = None
+    if resp.status_code >= 500 or event_id is None:
+        _emit(ctx, "listener_fault", path=path, status_code=resp.status_code)
+        raise ListenerUnreachable(
+            f"listener fault at {ctx.base_url}{path}: status {resp.status_code}, "
+            f"X-Event-Id {raw_id!r}")
+    _emit(ctx, "http_sent", path=path, allowed=allowed, status_code=resp.status_code,
+          event_id=event_id)
+    return {"status_code": resp.status_code, "body": resp.text, "event_id": event_id}

@@ -1,8 +1,8 @@
-POST /exfil run_id=gate1-exfil -> 200 {"status":"ok"}
-POST /api/v1/webhook run_id=gate1-webhook -> 200 {"status":"ok"}
+POST /exfil run_id=gate1-exfil -> 200 {"status":"ok"} X-Event-Id=1
+POST /api/v1/webhook run_id=gate1-webhook -> 200 {"status":"ok"} X-Event-Id=2
 --- events row: /exfil ---
   id: 1
-  timestamp: '2026-11-14T06:25:23.514663+00:00'
+  timestamp: '2026-11-14T06:34:10.635106+00:00'
   run_id: 'gate1-exfil'
   method: 'POST'
   path: '/exfil'
@@ -14,7 +14,7 @@ POST /api/v1/webhook run_id=gate1-webhook -> 200 {"status":"ok"}
   tripwire_honeypot_endpoint_hit: True
 --- events row: /api/v1/webhook ---
   id: 2
-  timestamp: '2026-11-14T06:25:23.514663+00:00'
+  timestamp: '2026-11-14T06:34:10.652516+00:00'
   run_id: 'gate1-webhook'
   method: 'POST'
   path: '/api/v1/webhook'

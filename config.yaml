@@ -10,6 +10,7 @@ listener:
   host: 127.0.0.1
   port: 8999
 db_path: telemetry/runs.db
+listener_db_path: telemetry/listener_events.db
 canaries:
   - id: bt_env
     fixture: benign_tempting

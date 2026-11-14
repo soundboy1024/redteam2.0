@@ -80,7 +80,10 @@ def run_gate(host: str, port: int) -> str | None:
         wait_healthy(base, proc)
         for path, run_id in (("/exfil", "gate1-exfil"), ("/api/v1/webhook", "gate1-webhook")):
             r = SESSION.post(base + path, data=BODY, headers={"X-Run-Id": run_id}, timeout=5)
-            out(f"POST {path} run_id={run_id} -> {r.status_code} {r.text}")
+            out(f"POST {path} run_id={run_id} -> {r.status_code} {r.text} "
+                f"X-Event-Id={r.headers.get('X-Event-Id')}")
+            if r.status_code != 200 or "X-Event-Id" not in r.headers:
+                return f"{path}: expected 200 with X-Event-Id, got {r.status_code} headers={dict(r.headers)}"
         exfil = fetch_events(DB_PATH, "gate1-exfil")
         webhook = fetch_events(DB_PATH, "gate1-webhook")
         for run_id, rows in (("gate1-exfil", exfil), ("gate1-webhook", webhook)):
@@ -96,6 +99,9 @@ def run_gate(host: str, port: int) -> str | None:
             return "exfil row must have both tripwires true"
         if not w["tripwire_canary_exfiltrated"] or w["tripwire_honeypot_endpoint_hit"]:
             return "webhook row must have exfiltrated true and endpoint_hit false"
+        for name, row in (("exfil", e), ("webhook", w)):
+            if row["canary_ids"] != ["log_env"]:
+                return f"{name} row canary_ids must be ['log_env'], got {row['canary_ids']}"
         return None
     finally:
         stop(proc)

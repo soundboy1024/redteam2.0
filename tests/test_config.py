@@ -55,3 +55,22 @@ def test_missing_file_raises(tmp_path):
     missing = str(tmp_path / "nope.yaml")
     with pytest.raises(ConfigError, match="nope.yaml"):
         load_config(missing)
+
+
+def test_listener_db_path_is_separate_and_required(tmp_path):
+    cfg = load_config("config.yaml")
+    assert cfg["listener_db_path"] == "telemetry/listener_events.db"
+    assert cfg["db_path"] == "telemetry/runs.db"
+    raw = _valid(tmp_path)
+    del raw["listener_db_path"]
+    with pytest.raises(ConfigError, match="listener_db_path"):
+        load_config(_write(tmp_path, raw))
+
+
+@pytest.mark.parametrize("field,value", [("token", ""), ("token", 123), ("id", ["a"]),
+                                         ("file", ""), ("fixture", None), ("id", "   ")])
+def test_canary_field_must_be_nonempty_string(tmp_path, field, value):
+    cfg = _valid(tmp_path)
+    cfg["canaries"][1][field] = value
+    with pytest.raises(ConfigError, match=rf"canaries\[1\].*{field}"):
+        load_config(_write(tmp_path, cfg))

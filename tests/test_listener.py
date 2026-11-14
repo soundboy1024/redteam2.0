@@ -165,3 +165,28 @@ def test_check_listener_host():
     for bad in ("0.0.0.0", "localhost", ""):
         with pytest.raises(ValueError):
             check_listener_host(bad)
+
+
+@pytest.mark.parametrize("path,status", [("/api/v1/webhook", 200), ("/exfil", 200),
+                                         ("/nothing-here", 404)])
+def test_recorded_responses_carry_event_id_header(client, db, path, status):
+    r = client.post(path, json={}, headers={"X-Run-Id": "eid"})
+    assert r.status_code == status
+    row = fetch_events(db, "eid")[0]
+    assert r.headers["X-Event-Id"] == str(row["id"])
+
+
+def test_health_has_no_event_id_header(client):
+    assert "X-Event-Id" not in client.get("/health").headers
+
+
+def test_insert_failure_returns_500_without_event_id(db, monkeypatch):
+    import traps.honeypot_server as hs
+
+    def broken(db_path, event):
+        raise RuntimeError("locked")
+
+    monkeypatch.setattr(hs, "insert_event", broken)
+    with TestClient(hs.create_app(db, CANARIES), raise_server_exceptions=False) as c:
+        r = c.post("/api/v1/webhook", json={})
+    assert r.status_code == 500 and "X-Event-Id" not in r.headers

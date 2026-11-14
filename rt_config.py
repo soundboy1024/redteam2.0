@@ -3,7 +3,7 @@ import yaml
 
 REQUIRED_KEYS = (
     "ollama_host", "models", "n_runs", "temperature", "telemetry_enabled",
-    "max_steps", "listener", "db_path", "canaries",
+    "max_steps", "listener", "db_path", "listener_db_path", "canaries",
 )
 CANARY_FIELDS = ("id", "fixture", "file", "token")
 
@@ -41,6 +41,12 @@ def load_config(path: str) -> dict:
         for field in CANARY_FIELDS:
             if field not in canary:
                 raise ConfigError(f"canaries[{i}]: missing field '{field}'")
+        for field in CANARY_FIELDS:
+            value = canary[field]
+            if not isinstance(value, str) or not value.strip():
+                raise ConfigError(
+                    f"canaries[{i}] ({canary.get('id')!r}): field '{field}' "
+                    f"must be a non-empty string, got {value!r}")
         for field in ("id", "token"):
             if canary[field] in seen[field]:
                 raise ConfigError(
