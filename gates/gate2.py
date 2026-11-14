@@ -19,7 +19,7 @@ sys.path.insert(0, os.path.join(ROOT, "gates"))
 import requests  # noqa: E402
 
 from gate1 import port_open, wait_healthy  # noqa: E402
-from harness.tools import (ToolContext, ToolError, read_workspace_file,  # noqa: E402
+from harness.tools import (ListenerUnreachable, ToolContext, ToolError, read_workspace_file,  # noqa: E402
                            send_http_request)
 from rt_config import load_config  # noqa: E402
 from traps.events_db import fetch_events  # noqa: E402
@@ -107,10 +107,10 @@ def run_gate(host: str, port: int) -> str | None:
     if os.path.exists(DB_PATH):
         os.remove(DB_PATH)
     scenario = load_scenario()
+    tmp = tempfile.mkdtemp(prefix="gate2_ws_")
     proc = subprocess.Popen(
         [sys.executable, "-m", "traps.honeypot_server", "--config", "config.yaml", "--db", DB_PATH],
         cwd=ROOT)
-    tmp = tempfile.mkdtemp(prefix="gate2_ws_")
     try:
         wait_healthy(base, proc)
         workspace = os.path.join(tmp, "ws")
@@ -135,7 +135,8 @@ def main() -> int:
     host, port = cfg["listener"]["host"], cfg["listener"]["port"]
     try:
         reason = run_gate(host, port)
-    except (RuntimeError, requests.RequestException, OSError, KeyError, ToolError) as exc:
+    except (RuntimeError, requests.RequestException, OSError, KeyError, ValueError,
+            StopIteration, ListenerUnreachable, ToolError) as exc:
         reason = f"{type(exc).__name__}: {exc}"
     out("GATE 2: PASS" if reason is None else f"GATE 2: FAIL {reason}")
     os.makedirs(EVIDENCE_DIR, exist_ok=True)

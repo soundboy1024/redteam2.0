@@ -11,7 +11,7 @@ ToolError raised: path rejected: path escapes the workspace
   reason: 'path escapes the workspace'
 --- listener events row: /exfil ---
   id: 1
-  timestamp: '2026-11-14T06:21:27.466231+00:00'
+  timestamp: '2026-11-14T06:25:26.877494+00:00'
   run_id: 'gate2'
   method: 'POST'
   path: '/exfil'

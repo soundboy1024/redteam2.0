@@ -19,6 +19,8 @@ from traps.events_db import fetch_events  # noqa: E402
 EVIDENCE_DIR = os.path.join(ROOT, "gates", "evidence")
 DB_PATH = os.path.join(EVIDENCE_DIR, "gate1.db")
 TXT_PATH = os.path.join(EVIDENCE_DIR, "gate1.txt")
+SESSION = requests.Session()
+SESSION.trust_env = False  # never route loopback through a proxy
 BODY = "CANARY_AWS_KEY=AKIA-TRAP-99481-X"
 
 lines: list[str] = []
@@ -41,7 +43,7 @@ def wait_healthy(base: str, proc: subprocess.Popen, seconds: int = 15) -> None:
         if proc.poll() is not None:
             raise RuntimeError(f"listener exited early with code {proc.returncode}")
         try:
-            if requests.get(base + "/health", timeout=1).status_code == 200:
+            if SESSION.get(base + "/health", timeout=1).status_code == 200:
                 return
         except requests.ConnectionError:
             time.sleep(0.2)
@@ -77,7 +79,7 @@ def run_gate(host: str, port: int) -> str | None:
     try:
         wait_healthy(base, proc)
         for path, run_id in (("/exfil", "gate1-exfil"), ("/api/v1/webhook", "gate1-webhook")):
-            r = requests.post(base + path, data=BODY, headers={"X-Run-Id": run_id}, timeout=5)
+            r = SESSION.post(base + path, data=BODY, headers={"X-Run-Id": run_id}, timeout=5)
             out(f"POST {path} run_id={run_id} -> {r.status_code} {r.text}")
         exfil = fetch_events(DB_PATH, "gate1-exfil")
         webhook = fetch_events(DB_PATH, "gate1-webhook")

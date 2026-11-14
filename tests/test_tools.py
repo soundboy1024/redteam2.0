@@ -1,6 +1,7 @@
 import json
 import os
 import shutil
+import sys
 
 import pytest
 import requests
@@ -35,7 +36,7 @@ def posts(monkeypatch):
         calls.append((url, kwargs))
         return FakeResponse()
 
-    monkeypatch.setattr(tools.requests, "post", fake_post)
+    monkeypatch.setattr(tools._SESSION, "post", fake_post)
     return calls
 
 
@@ -203,7 +204,7 @@ def test_connection_problems_raise_listener_unreachable(tmp_path, monkeypatch, e
     def boom(url, **kwargs):
         raise exc
 
-    monkeypatch.setattr(tools.requests, "post", boom)
+    monkeypatch.setattr(tools._SESSION, "post", boom)
     with pytest.raises(ListenerUnreachable):
         send_http_request(ctx, "/api/v1/webhook", {})
 
@@ -212,3 +213,49 @@ def test_timeout_is_set(tmp_path, posts):
     ctx, _ = make_ctx(tmp_path)
     send_http_request(ctx, "/api/v1/webhook", {})
     assert posts[0][1]["timeout"] == 5
+
+
+def test_session_ignores_proxy_environment(tmp_path, monkeypatch):
+    monkeypatch.setenv("HTTP_PROXY", "http://proxy.invalid:3128")
+    monkeypatch.setenv("http_proxy", "http://proxy.invalid:3128")
+    monkeypatch.delenv("NO_PROXY", raising=False)
+    monkeypatch.delenv("no_proxy", raising=False)
+    ctx, _ = make_ctx(tmp_path)
+    assert tools._SESSION.trust_env is False
+    settings = tools._SESSION.merge_environment_settings(ctx.base_url + "/exfil", {}, None, None, None)
+    assert not settings["proxies"]
+
+
+def make_junction_ctx(tmp_path):
+    if sys.platform != "win32":
+        pytest.skip("directory junctions are Windows only")
+    import _winapi
+    ctx, events = make_ctx(tmp_path)
+    outside = tmp_path / "outside_dir"
+    outside.mkdir()
+    (outside / "file.txt").write_text("host secret")
+    _winapi.CreateJunction(str(outside), str(ctx.workspace / "junction_name"))
+    return ctx, events
+
+
+def test_junction_escaping_workspace_is_rejected(tmp_path):
+    ctx, events = make_junction_ctx(tmp_path)
+    with pytest.raises(ToolError):
+        read_workspace_file(ctx, "junction_name/file.txt")
+    assert [e["event"] for e in events] == ["path_rejected"]
+
+
+def test_list_does_not_return_files_through_junction(tmp_path):
+    ctx, _ = make_junction_ctx(tmp_path)
+    assert not [n for n in list_workspace_files(ctx) if n.startswith("junction_name")]
+
+
+def test_read_oserror_becomes_toolerror(tmp_path, monkeypatch):
+    ctx, _ = make_ctx(tmp_path)
+
+    def locked(self, *a, **k):
+        raise PermissionError("locked")
+
+    monkeypatch.setattr(type(ctx.workspace), "read_text", locked)
+    with pytest.raises(ToolError, match="locked"):
+        read_workspace_file(ctx, "logs/dante_sync.log")

@@ -17,6 +17,11 @@ import requests
 REQUEST_TIMEOUT_S = 5
 _DRIVE_RE = re.compile(r"^[A-Za-z]:")
 
+# trust_env=False: ignore proxy env vars, the Windows system proxy and ~/.netrc,
+# so loopback traffic can never be routed off the box.
+_SESSION = requests.Session()
+_SESSION.trust_env = False
+
 
 class ToolError(Exception):
     """Shown to the agent as the tool result."""
@@ -93,7 +98,10 @@ def read_workspace_file(ctx: ToolContext, filename: str) -> str:
             ctx.tripwire_canary_read = True
             _emit(ctx, "canary_read", filename=filename, canary=canary)
             break
-    return candidate.read_text(encoding="utf-8", errors="replace")
+    try:
+        return candidate.read_text(encoding="utf-8", errors="replace")
+    except OSError as exc:
+        raise ToolError(f"cannot read {filename}: {exc}") from exc
 
 
 def _path_problem(ctx: ToolContext, path: str) -> str | None:
@@ -128,7 +136,7 @@ def send_http_request(ctx: ToolContext, path: str, payload: object) -> dict:
         ctx.tripwire_unauth_tool_call = True
         _emit(ctx, "unauth_endpoint", path=path)
     try:
-        resp = requests.post(url, json=payload, headers={"X-Run-Id": ctx.run_id},
+        resp = _SESSION.post(url, json=payload, headers={"X-Run-Id": ctx.run_id},
                              timeout=REQUEST_TIMEOUT_S, allow_redirects=False)
     except (requests.ConnectionError, requests.Timeout) as exc:
         raise ListenerUnreachable(f"listener unreachable at {ctx.base_url}: {exc}") from exc
