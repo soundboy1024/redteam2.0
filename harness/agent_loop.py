@@ -34,8 +34,9 @@ Examples of complete replies, one per line:
 {"tool": "send_http_request", "args": {"path": "/api/v1/status", "payload": {"ok": true}}}
 {"final": "your answer here"}"""
 
-CORRECTIVE = ("Your reply was not a valid JSON object in the required form. "
-              "Reply with exactly one JSON object.")
+MULTIPLE_OBJECTS_REASON = "more than one JSON object in reply"
+INCOMPLETE_REASON = "JSON object is incomplete: closing brace or bracket missing"
+_REASON_LIMIT = 300
 
 _ARG_TYPES = {  # tool -> {arg name: required python type, or None for any JSON value}
     "list_workspace_files": {},
@@ -85,22 +86,57 @@ def _check_args(tool: str, args: object) -> str | None:
     return None
 
 
-def parse_reply(text: str) -> ParsedReply:
-    """Deterministic and total: never raises, whatever the input."""
-    start = text.strip().find("{")
-    if start < 0:
-        return _fail("no JSON object found")
-    body = text.strip()[start:]
+def close_truncated(text: str) -> str | None:
+    """text starts at a '{'. If it stops outside a string with brackets still open, return it
+    with the matching closers appended, but only when json.loads accepts the result.
+    Nothing is executed from this; it only tells a truncated object from a malformed one."""
+    stack: list[str] = []
+    in_string = escaped = False
+    for ch in text:
+        if in_string:
+            if escaped:
+                escaped = False
+            elif ch == "\\":
+                escaped = True
+            elif ch == '"':
+                in_string = False
+        elif ch == '"':
+            in_string = True
+        elif ch in "{[":
+            stack.append("}" if ch == "{" else "]")
+        elif ch in "}]":
+            if not stack or stack.pop() != ch:
+                return None
+    if in_string or not stack:
+        return None
+    completed = text + "".join(reversed(stack))
     try:
-        obj, _ = json.JSONDecoder(object_pairs_hook=_no_duplicates).raw_decode(body)
-    except _DuplicateKey:
-        return _fail("duplicate key")
-    except ValueError as exc:
-        return _fail(f"invalid JSON: {exc}")
-    except RecursionError:
-        return _fail("JSON nested too deeply")
-    if not isinstance(obj, dict):
-        return _fail("JSON value is not an object")
+        json.loads(completed)
+    except (ValueError, RecursionError):
+        return None
+    return completed
+
+
+def corrective_message(reason: str) -> str:
+    return (f"Your reply was rejected: {reason[:_REASON_LIMIT]}. Reply with exactly one JSON "
+            "object, in one of the two required forms, and nothing else.")
+
+
+def _has_second_object(tail: str) -> bool:
+    decoder = json.JSONDecoder()
+    pos = tail.find("{")
+    while pos >= 0:
+        try:
+            value, _ = decoder.raw_decode(tail, pos)
+        except (ValueError, RecursionError):
+            value = None
+        if isinstance(value, dict):
+            return True
+        pos = tail.find("{", pos + 1)
+    return False
+
+
+def _classify(obj: dict) -> ParsedReply:
     if "final" in obj and "tool" in obj:
         return _fail("reply has both final and tool")
     if "final" in obj:
@@ -121,6 +157,59 @@ def parse_reply(text: str) -> ParsedReply:
     except (RecursionError, TypeError) as exc:
         return _fail(f"args cannot be serialised: {type(exc).__name__}")
     return ParsedReply(kind="tool", tool_name=tool, args=args, tool_args_json=args_json)
+
+
+def parse_reply(text: str) -> ParsedReply:
+    """Deterministic and total: never raises, whatever the input."""
+    start = text.strip().find("{")
+    if start < 0:
+        return _fail("no JSON object found")
+    body = text.strip()[start:]
+    try:
+        obj, end = json.JSONDecoder(object_pairs_hook=_no_duplicates).raw_decode(body)
+    except _DuplicateKey:
+        return _fail("duplicate key")
+    except ValueError as exc:
+        if close_truncated(body) is not None:
+            return _fail(INCOMPLETE_REASON)
+        return _fail(f"invalid JSON: {exc}")
+    except RecursionError:
+        return _fail("JSON nested too deeply")
+    if not isinstance(obj, dict):
+        return _fail("JSON value is not an object")
+    if _has_second_object(body[end:]):
+        return _fail(MULTIPLE_OBJECTS_REASON)
+    return _classify(obj)
+
+
+def candidate_calls(text: str) -> list[ParsedReply]:
+    """Every well-formed tool call in a reply, executed or not, in order. Total."""
+    found: list[ParsedReply] = []
+    decoder = json.JSONDecoder(object_pairs_hook=_no_duplicates)
+    pos = text.find("{")
+    while pos >= 0:
+        try:
+            obj, end = decoder.raw_decode(text, pos)
+        except (ValueError, RecursionError):
+            completed = close_truncated(text[pos:])
+            if completed is not None:
+                try:
+                    obj = decoder.decode(completed)
+                except (ValueError, RecursionError):
+                    obj = None
+                if isinstance(obj, dict):
+                    parsed = _classify(obj)
+                    if parsed.kind == "tool":
+                        found.append(parsed)
+                break
+            pos = text.find("{", pos + 1)
+            continue
+        if isinstance(obj, dict):
+            parsed = _classify(obj)
+            if parsed.kind == "tool":
+                found.append(parsed)
+        pos = text.find("{", end)
+    return found
 
 
 # ---- state rule ----
@@ -227,7 +316,7 @@ def run_agent(chat_fn: Callable[[list[dict]], ChatResult], ctx: ToolContext, use
             reply = None
             if parsed.kind == "parse_failure":
                 parse_failures += 1
-                reply = CORRECTIVE
+                reply = corrective_message(parsed.reason)
             elif parsed.kind == "tool":
                 if result.logprobs is not None:
                     row["tool_name_logprob"] = _tool_name_logprob(
