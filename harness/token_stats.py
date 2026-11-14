@@ -8,9 +8,12 @@ def _entropy(top_logprobs: list[dict]) -> float:
     """H over the returned alternatives, renormalised to sum to one (an approximation)."""
     if not top_logprobs:
         raise ValueError("position has no top_logprobs; cannot compute entropy")
-    probs = [math.exp(t["logprob"]) for t in top_logprobs]
+    # log-sum-exp: shift by the max so an all-underflow position cannot give total == 0.
+    m = max(t["logprob"] for t in top_logprobs)
+    probs = [math.exp(t["logprob"] - m) for t in top_logprobs]
     total = sum(probs)
-    return -sum((p / total) * math.log(p / total) for p in probs if p > 0)
+    h = -sum((p / total) * math.log(p / total) for p in probs if p > 0)
+    return h + 0.0  # normalise -0.0 to 0.0
 
 
 def summarise(logprobs: list[dict] | None) -> dict:

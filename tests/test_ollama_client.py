@@ -7,7 +7,8 @@ from harness import ollama_client, tools
 from harness.ollama_client import OllamaError, chat
 
 HOST = "http://127.0.0.1:11434"
-LOGPROBS = [{"token": "a", "logprob": -0.1, "bytes": [97], "top_logprobs": []}]
+LOGPROBS = [{"token": "a", "logprob": -0.1, "bytes": [97],
+             "top_logprobs": [{"token": "a", "logprob": -0.1, "bytes": [97]}]}]
 
 
 class FakeResp:
@@ -35,7 +36,7 @@ def calls(monkeypatch):
 
     def install(resp):
         def fake_post(url, json=None, timeout=None, **kw):
-            rec.append({"url": url, "json": json, "timeout": timeout})
+            rec.append({"url": url, "json": json, "timeout": timeout, "kw": kw})
             if isinstance(resp, Exception):
                 raise resp
             return resp
@@ -162,3 +163,49 @@ def test_session_ignores_proxy_env(monkeypatch):
     monkeypatch.setenv("HTTP_PROXY", "http://proxy.invalid:1")
     assert ollama_client._SESSION.trust_env is False
     assert ollama_client._SESSION is not tools._SESSION
+
+
+def test_post_disables_redirects(calls):
+    rec = calls(FakeResp(body=good_body()))
+    call()
+    assert rec[0]["kw"].get("allow_redirects") is False
+
+
+def test_redirect_response_raises(calls):
+    calls(FakeResp(status=307, text="redirect to elsewhere"))
+    with pytest.raises(OllamaError, match="307"):
+        call()
+
+
+def test_trailing_slash_host_single_slash(calls):
+    rec = calls(FakeResp(body=good_body()))
+    call(host="http://127.0.0.1:11434/")
+    assert rec[0]["url"] == "http://127.0.0.1:11434/api/chat"
+
+
+@pytest.mark.parametrize("host", ["http://127.0.0.1:11434/x", "http://127.0.0.1:99999",
+                                  "http://127.0.0.1:abc", "http://user@127.0.0.1:11434",
+                                  "http://127.0.0.1:11434?a=1", "http://127.0.0.1:11434/#f"])
+def test_malformed_host_refused(calls, host):
+    rec = calls(FakeResp(body=good_body()))
+    with pytest.raises(OllamaError):
+        call(host=host)
+    assert rec == []
+
+
+def _lp_with(entry):
+    return good_body(logprobs=[entry])
+
+
+@pytest.mark.parametrize("entry,frag", [
+    ("notadict", "index 0"),
+    ({"token": "a", "top_logprobs": [{"logprob": -1.0}]}, "logprob"),
+    ({"token": "a", "logprob": -1.0, "top_logprobs": []}, "top_logprobs"),
+    ({"token": "a", "logprob": True, "top_logprobs": [{"logprob": -1.0}]}, "logprob"),
+    ({"token": "a", "logprob": -1.0, "top_logprobs": [{"token": "a"}]}, "top_logprobs"),
+])
+def test_malformed_logprob_entries_raise(calls, entry, frag):
+    calls(FakeResp(body=_lp_with(entry)))
+    with pytest.raises(OllamaError, match=frag) as e:
+        call(telemetry=True)
+    assert "index 0" in str(e.value)

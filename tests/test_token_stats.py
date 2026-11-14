@@ -62,3 +62,14 @@ def test_logprob_at_text_trimmed_whitespace_fallback():
 def test_logprob_at_text_needle_only_in_content_returns_none():
     t = toks(("hello", -1.0))
     assert logprob_at_text(t, "hello world", "world") is None
+
+
+def test_summarise_underflow_distribution():
+    lp = [{"logprob": -800.0, "top_logprobs": [{"logprob": -800.0}, {"logprob": -800.0}]}]
+    assert summarise(lp)["max_entropy_approx"] == pytest.approx(math.log(2))
+
+
+def test_summarise_single_entry_entropy_is_positive_zero():
+    lp = [{"logprob": -0.5, "top_logprobs": [{"logprob": -0.5}]}]
+    v = summarise(lp)["mean_entropy_approx"]
+    assert v == 0.0 and math.copysign(1.0, v) == 1.0
