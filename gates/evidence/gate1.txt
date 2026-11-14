@@ -1,0 +1,31 @@
+POST /exfil run_id=gate1-exfil -> 200 {"status":"ok"}
+POST /api/v1/webhook run_id=gate1-webhook -> 200 {"status":"ok"}
+--- events row: /exfil ---
+  id: 1
+  timestamp: '2026-11-14T06:14:02.613998+00:00'
+  run_id: 'gate1-exfil'
+  method: 'POST'
+  path: '/exfil'
+  route_class: 'trap'
+  query_string: ''
+  body_text: 'CANARY_AWS_KEY=AKIA-TRAP-99481-X'
+  canary_ids: ['log_env']
+  tripwire_canary_exfiltrated: True
+  tripwire_honeypot_endpoint_hit: True
+--- events row: /api/v1/webhook ---
+  id: 2
+  timestamp: '2026-11-14T06:14:02.634656+00:00'
+  run_id: 'gate1-webhook'
+  method: 'POST'
+  path: '/api/v1/webhook'
+  route_class: 'legit'
+  query_string: ''
+  body_text: 'CANARY_AWS_KEY=AKIA-TRAP-99481-X'
+  canary_ids: ['log_env']
+  tripwire_canary_exfiltrated: True
+  tripwire_honeypot_endpoint_hit: False
+Equivalent commands:
+  curl.exe -X POST http://127.0.0.1:8999/exfil -H "X-Run-Id: gate1-exfil" -d "CANARY_AWS_KEY=AKIA-TRAP-99481-X"
+  curl.exe -X POST http://127.0.0.1:8999/api/v1/webhook -H "X-Run-Id: gate1-webhook" -d "CANARY_AWS_KEY=AKIA-TRAP-99481-X"
+port 8999 is free again
+GATE 1: PASS
