@@ -25,7 +25,11 @@ def stop_listener(proc: subprocess.Popen) -> None:
     except subprocess.TimeoutExpired:
         log.warning("listener ignored terminate; killing the process this run started")
         proc.kill()
-        proc.wait(timeout=10)
+        try:
+            proc.wait(timeout=5)
+        except subprocess.TimeoutExpired as exc:
+            log.error("listener pid %s still running after kill", proc.pid)
+            raise RuntimeError(f"listener pid {proc.pid} still running after kill") from exc
 
 
 def _wait_healthy(base: str, proc: subprocess.Popen, wait_s: int) -> None:
@@ -37,6 +41,10 @@ def _wait_healthy(base: str, proc: subprocess.Popen, wait_s: int) -> None:
             raise RuntimeError(f"listener exited early with code {proc.returncode}")
         try:
             if session.get(base + "/health", timeout=1).status_code == 200:
+                if proc.poll() is not None:
+                    raise RuntimeError(
+                        f"listener exited with code {proc.returncode} but something "
+                        f"else is answering /health on {base}")
                 return
         except requests.RequestException:
             pass
@@ -52,10 +60,12 @@ def start_listener(config_path: str, db_path: str, host: str, port: int,
         [sys.executable, "-m", "traps.honeypot_server", "--config", config_path,
          "--db", db_path, "--port", str(port)],
         cwd=ROOT)
+    started_ok = False
     try:
         _wait_healthy(f"http://{host}:{port}", proc, wait_s)
-    except RuntimeError:
-        log.error("listener on port %s failed to start; stopping it", port)
-        stop_listener(proc)
-        raise
+        started_ok = True
+    finally:
+        if not started_ok:
+            log.error("listener on port %s failed to start; stopping it", port)
+            stop_listener(proc)
     return proc

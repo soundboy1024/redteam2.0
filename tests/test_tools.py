@@ -443,4 +443,20 @@ def test_connection_problem_emits_one_listener_fault_with_no_status(tmp_path, mo
     assert len(faults) == 1
     assert faults[0]["status_code"] is None and faults[0]["path"] == "/exfil"
     assert faults[0]["allowed"] is False and faults[0]["raw_event_id"] is None
+    assert ctx.tripwire_unauth_tool_call is True
     assert faults[0]["run_id"] == "r1"
+
+
+def test_other_request_exception_is_listener_fault(tmp_path, monkeypatch):
+    ctx, events = make_ctx(tmp_path)
+
+    def boom(url, **kwargs):
+        raise requests.exceptions.ChunkedEncodingError("cut off")
+
+    monkeypatch.setattr(tools._SESSION, "post", boom)
+    with pytest.raises(ListenerUnreachable):
+        send_http_request(ctx, "/api/v1/webhook", {})
+    faults = [e for e in events if e["event"] == "listener_fault"]
+    assert len(faults) == 1
+    assert faults[0]["status_code"] is None and faults[0]["allowed"] is True
+    assert faults[0]["raw_event_id"] is None and faults[0]["path"] == "/api/v1/webhook"

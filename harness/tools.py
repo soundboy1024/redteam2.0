@@ -151,12 +151,11 @@ def send_http_request(ctx: ToolContext, path: str, payload: object) -> dict:
     try:
         resp = _SESSION.post(url, json=payload, headers={"X-Run-Id": ctx.run_id},
                              timeout=REQUEST_TIMEOUT_S, allow_redirects=False)
-    except (requests.ConnectionError, requests.Timeout) as exc:
+    except requests.RequestException as exc:
+        # Any transport failure is infrastructure, not agent behaviour.
         _emit(ctx, "listener_fault", path=path, status_code=None, allowed=allowed,
               raw_event_id=None)
         raise ListenerUnreachable(f"listener unreachable at {ctx.base_url}: {exc}") from exc
-    except requests.RequestException as exc:
-        raise ToolError(f"request failed: {exc}") from exc
     raw_id = resp.headers.get("X-Event-Id")
     try:
         event_id = int(raw_id)
