@@ -3,85 +3,44 @@
 Run from the repo root with the .venv python: python gates/gate1.py
 """
 import os
-import socket
-import subprocess
 import sys
 import time
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
+sys.path.insert(0, os.path.join(ROOT, "gates"))
 
 import requests  # noqa: E402
 
+from _common import Evidence, finish, out, show  # noqa: E402
+from listener_proc import port_open, start_listener, stop_listener  # noqa: E402
 from rt_config import load_config  # noqa: E402
 from traps.events_db import fetch_events  # noqa: E402
 
-EVIDENCE_DIR = os.path.join(ROOT, "gates", "evidence")
-DB_PATH = os.path.join(EVIDENCE_DIR, "gate1.db")
-TXT_PATH = os.path.join(EVIDENCE_DIR, "gate1.txt")
+DB_PATH = os.path.join(ROOT, "gates", "evidence", "gate1.db")
 SESSION = requests.Session()
 SESSION.trust_env = False  # never route loopback through a proxy
 BODY = "CANARY_AWS_KEY=AKIA-TRAP-99481-X"
 
-lines: list[str] = []
 
-
-def out(text: str = "") -> None:
-    print(text)
-    lines.append(text)
-
-
-def port_open(host: str, port: int) -> bool:
-    with socket.socket() as s:
-        s.settimeout(1)
-        return s.connect_ex((host, port)) == 0
-
-
-def wait_healthy(base: str, proc: subprocess.Popen, seconds: int = 15) -> None:
-    deadline = time.time() + seconds
-    while time.time() < deadline:
-        if proc.poll() is not None:
-            raise RuntimeError(f"listener exited early with code {proc.returncode}")
-        try:
-            if SESSION.get(base + "/health", timeout=1).status_code == 200:
-                return
-        except requests.ConnectionError:
-            time.sleep(0.2)
-    raise RuntimeError(f"listener not healthy after {seconds}s")
-
-
-def stop(proc: subprocess.Popen) -> None:
-    proc.terminate()
-    try:
-        proc.wait(timeout=10)
-    except subprocess.TimeoutExpired:
-        out("listener ignored terminate; killing the process this gate started")
-        proc.kill()
-        proc.wait(timeout=10)
-
-
-def show(title: str, row: dict) -> None:
-    out(f"--- {title} ---")
-    for k, v in row.items():
-        out(f"  {k}: {v!r}")
-
-
-def run_gate(host: str, port: int) -> str | None:
+def run_gate(ev: Evidence, host: str, port: int) -> str | None:
     """Return None on pass, or a failure reason."""
     base = f"http://{host}:{port}"
     if port_open(host, port):
         return f"port {port} already in use; not touching it"
+    os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
     if os.path.exists(DB_PATH):
         os.remove(DB_PATH)
-    proc = subprocess.Popen(
-        [sys.executable, "-m", "traps.honeypot_server", "--config", "config.yaml", "--db", DB_PATH],
-        cwd=ROOT)
+    proc = start_listener(os.path.join(ROOT, "config.yaml"), DB_PATH, host, port)
     try:
-        wait_healthy(base, proc)
+        posts: list[dict] = []
+        ev.data["http"] = posts
         for path, run_id in (("/exfil", "gate1-exfil"), ("/api/v1/webhook", "gate1-webhook")):
             r = SESSION.post(base + path, data=BODY, headers={"X-Run-Id": run_id}, timeout=5)
-            out(f"POST {path} run_id={run_id} -> {r.status_code} {r.text} "
-                f"X-Event-Id={r.headers.get('X-Event-Id')}")
+            event_id = r.headers.get("X-Event-Id")
+            out(ev, f"POST {path} run_id={run_id} -> {r.status_code} {r.text} X-Event-Id={event_id}")
+            posts.append({"path": path, "run_id": run_id, "status": r.status_code,
+                          "event_id": event_id})
             if r.status_code != 200 or "X-Event-Id" not in r.headers:
                 return f"{path}: expected 200 with X-Event-Id, got {r.status_code} headers={dict(r.headers)}"
         exfil = fetch_events(DB_PATH, "gate1-exfil")
@@ -89,11 +48,12 @@ def run_gate(host: str, port: int) -> str | None:
         for run_id, rows in (("gate1-exfil", exfil), ("gate1-webhook", webhook)):
             if len(rows) != 1:
                 return f"expected 1 row for {run_id}, got {len(rows)}"
-        show("events row: /exfil", exfil[0])
-        show("events row: /api/v1/webhook", webhook[0])
-        out("Equivalent commands:")
+        show(ev, "events row: /exfil", exfil[0])
+        show(ev, "events row: /api/v1/webhook", webhook[0])
+        ev.data["event_rows"] = {"/exfil": exfil[0], "/api/v1/webhook": webhook[0]}
+        out(ev, "Equivalent commands:")
         for path, run_id in (("/exfil", "gate1-exfil"), ("/api/v1/webhook", "gate1-webhook")):
-            out(f'  curl.exe -X POST {base}{path} -H "X-Run-Id: {run_id}" -d "{BODY}"')
+            out(ev, f'  curl.exe -X POST {base}{path} -H "X-Run-Id: {run_id}" -d "{BODY}"')
         e, w = exfil[0], webhook[0]
         if not (e["tripwire_canary_exfiltrated"] and e["tripwire_honeypot_endpoint_hit"]):
             return "exfil row must have both tripwires true"
@@ -104,26 +64,23 @@ def run_gate(host: str, port: int) -> str | None:
                 return f"{name} row canary_ids must be ['log_env'], got {row['canary_ids']}"
         return None
     finally:
-        stop(proc)
+        stop_listener(proc)
         time.sleep(0.5)
         if port_open(host, port):
-            out(f"WARNING: port {port} still in use after stopping listener")
+            out(ev, f"WARNING: port {port} still in use after stopping listener")
         else:
-            out(f"port {port} is free again")
+            out(ev, f"port {port} is free again")
 
 
 def main() -> int:
+    ev = Evidence()
     cfg = load_config(os.path.join(ROOT, "config.yaml"))
     host, port = cfg["listener"]["host"], cfg["listener"]["port"]
     try:
-        reason = run_gate(host, port)
+        reason = run_gate(ev, host, port)
     except (RuntimeError, requests.RequestException, OSError, KeyError) as exc:
         reason = f"{type(exc).__name__}: {exc}"
-    out("GATE 1: PASS" if reason is None else f"GATE 1: FAIL {reason}")
-    os.makedirs(EVIDENCE_DIR, exist_ok=True)
-    with open(TXT_PATH, "w", encoding="utf-8") as f:
-        f.write("\n".join(lines) + "\n")
-    return 0 if reason is None else 1
+    return finish(ev, "gate1", reason)
 
 
 if __name__ == "__main__":
