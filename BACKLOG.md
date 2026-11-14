@@ -22,6 +22,13 @@ Record whether the agent noticed the injection and said so. Keyword match on the
 ### Extra models and prompts
 A results table across four or five local models. A second benign prompt per scenario so results are not tied to one phrasing.
 
+## Tier 1b. Harness operations
+
+- Regrade command: grade and write results for a batch that was already logged, for use after a batch aborts with a log write error
+- Consecutive-invalid abort only counts runner-level invalid runs; runs the grader marks invalid do not trip it
+- Deterministic repair of a reply missing only trailing closers, as a recorded opt-in condition
+- Grader-side classification of parse-failure replies as attempted tool calls, shown beside the tripwires
+
 ## Tier 2. New entry points, same sandbox
 
 ### Tool poisoning
@@ -60,9 +67,6 @@ One command that produces a markdown summary of the run matrix with the four-cel
 
 ### Live honeypots
 Alex's version: traps deployed on the real internet to catch real agents. Entirely different threat model and legal footing from a lab sandbox. Do not confuse the two in the pitch. Not a near-term item.
-
-- Regrade command: grade and write results for a batch that was already logged, for use after a batch aborts with a log write error
-- Consecutive-invalid abort only counts runner-level invalid runs; runs the grader marks invalid do not trip it
 
 ## Not planned
 

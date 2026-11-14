@@ -165,3 +165,16 @@ def test_stop_listener_returns_true_when_it_had_to_kill():
 
     p = IgnoresTerminate()
     assert listener_proc.stop_listener(p) is True and p.killed
+
+
+
+# ---- final fix wave: loopback host only (G2) ----
+
+@pytest.mark.parametrize("host", ["localhost", "0.0.0.0", "127.0.0.2", "::1", ""])
+def test_start_listener_refuses_non_loopback_host(monkeypatch, host):
+    launched = []
+    monkeypatch.setattr(subprocess, "Popen", lambda *a, **k: launched.append(a))
+    monkeypatch.setattr(listener_proc, "port_open", lambda h, p: launched.append("probe"))
+    with pytest.raises(ValueError, match="127.0.0.1"):
+        listener_proc.start_listener("config.yaml", "x.db", host, _free_port())
+    assert launched == []

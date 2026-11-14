@@ -10,6 +10,7 @@ import requests
 
 log = logging.getLogger(__name__)
 ROOT = os.path.dirname(os.path.abspath(__file__))
+LOOPBACK_HOST = "127.0.0.1"
 
 
 def port_open(host: str, port: int) -> bool:
@@ -58,6 +59,10 @@ def _wait_healthy(base: str, proc: subprocess.Popen, wait_s: int) -> None:
 
 def start_listener(config_path: str, db_path: str, host: str, port: int,
                    wait_s: int = 15) -> subprocess.Popen:
+    if host != LOOPBACK_HOST:
+        # The subprocess always binds the configured loopback host; anything else
+        # would make the health check and the tools talk to a different address.
+        raise ValueError(f"listener host must be {LOOPBACK_HOST}, got {host!r}")
     if port_open(host, port):
         raise RuntimeError(f"port {port} already in use; not touching it")
     proc = subprocess.Popen(

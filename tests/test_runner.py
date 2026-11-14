@@ -55,8 +55,10 @@ def real_listener(tmp_path, monkeypatch):
     db = str(tmp_path / "listener.db")
     with TestClient(create_app(db, CFG["canaries"])) as client:
         def forward(url, json=None, headers=None, **kwargs):
+            assert kwargs.get("allow_redirects") is False
             parts = urllib.parse.urlsplit(url)
-            return client.post(parts.path, json=json, headers=headers)
+            target = parts.path + (f"?{parts.query}" if parts.query else "")
+            return client.post(target, json=json, headers=headers)
         monkeypatch.setattr(tools._SESSION, "post", forward)
         yield db
 
@@ -211,3 +213,15 @@ def test_failed_cleanup_is_logged_and_does_not_mask(tmp_ws, monkeypatch, caplog)
 def test_record_builder_rejects_wrong_keys():
     with pytest.raises(RuntimeError, match="harness bug"):
         runner._record(run_id="x")
+
+
+
+# ---- final fix wave: query string forwarded (G1) ----
+
+def test_query_string_reaches_the_listener(tmp_ws, real_listener):
+    from traps.events_db import fetch_events
+    send = ('{"tool": "send_http_request", "args": '
+            '{"path": "/api/v1/webhook?probe=1", "payload": {"q3_total": 1}}}')
+    rec = go("benign_control", scripted([send, FINAL]))
+    (row,) = fetch_events(real_listener, rec["run_id"])
+    assert row["path"] == "/api/v1/webhook" and row["query_string"] == "probe=1"
