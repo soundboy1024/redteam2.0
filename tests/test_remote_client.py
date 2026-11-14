@@ -347,3 +347,71 @@ def test_list_models_errors(session):
     session(FakeResp(401, text="denied"))
     with pytest.raises(RemoteModelError, match="401"):
         list_models("groq", KEY)
+
+
+def test_malformed_key_never_leaks_through_real_header_validation(caplog):
+    """No network: requests rejects the header while preparing the request."""
+    import traceback
+    bad = "sk-test-key\n"
+    with caplog.at_level(logging.DEBUG):
+        with pytest.raises(RemoteModelError) as e:
+            chat(ANTHROPIC, MSGS, temperature=None, seed=1, max_tokens=10, timeout_s=5,
+                 api_key=bad, sleep=lambda s: pytest.fail("must not retry"))
+    rendered = "".join(traceback.format_exception(e.value))
+    assert "InvalidHeader" in str(e.value)
+    assert "sk-test-key" not in rendered and "sk-test-key" not in caplog.text
+    assert e.value.__cause__ is None and e.value.__context__ is None
+
+
+def test_non_transport_request_error_is_not_retried(session):
+    calls = session(requests.exceptions.InvalidURL("x"))
+    sleeps = []
+    with pytest.raises(RemoteModelError, match="InvalidURL"):
+        run(sleeps=sleeps)
+    assert sleeps == [] and len(calls) == 1
+
+
+def test_connection_error_text_is_not_logged(session, caplog):
+    session(requests.ConnectionError(f"boom {KEY}"), FakeResp(body=openai_body()))
+    with caplog.at_level(logging.DEBUG):
+        run(model=GROQ)
+    assert KEY not in caplog.text and "ConnectionError" in caplog.text
+
+
+def test_empty_assistant_turn_is_replaced_for_anthropic(session):
+    calls = session(FakeResp(body=anthropic_body()))
+    msgs = MSGS + [{"role": "assistant", "content": ""},
+                   {"role": "user", "content": "fix"},
+                   {"role": "assistant", "content": "  \n"},
+                   {"role": "assistant", "content": "ok"}]
+    chat(ANTHROPIC, msgs, temperature=None, seed=1, max_tokens=10, timeout_s=5,
+         api_key=KEY, sleep=lambda s: None)
+    out = calls[0]["json"]["messages"]
+    assert [m["content"] for m in out] == [
+        "hello", remote_client.EMPTY_REPLY_PLACEHOLDER, "fix",
+        remote_client.EMPTY_REPLY_PLACEHOLDER, "ok"]
+    assert remote_client.EMPTY_REPLY_PLACEHOLDER == "(empty reply)"
+    assert msgs[2]["content"] == ""  # the caller's list is not mutated
+
+
+def test_openai_messages_are_not_rewritten(session):
+    calls = session(FakeResp(body=openai_body()))
+    msgs = MSGS + [{"role": "assistant", "content": ""}]
+    chat(GROQ, msgs, temperature=None, seed=1, max_tokens=10, timeout_s=5,
+         api_key=KEY, sleep=lambda s: None)
+    assert calls[0]["json"]["messages"] == msgs
+
+
+def test_anthropic_without_system_message_omits_field(session):
+    calls = session(FakeResp(body=anthropic_body()))
+    chat(ANTHROPIC, MSGS[1:], temperature=None, seed=1, max_tokens=10, timeout_s=5,
+         api_key=KEY, sleep=lambda s: None)
+    assert "system" not in calls[0]["json"]
+
+
+def test_list_models_retries_through_sleep(session):
+    session(FakeResp(429, text="slow", headers={"retry-after": "2"}),
+            FakeResp(body={"data": [{"id": "a"}]}))
+    sleeps = []
+    assert list_models("groq", KEY, sleep=sleeps.append) == ["a"]
+    assert sleeps == [2]

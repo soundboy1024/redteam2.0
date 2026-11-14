@@ -301,6 +301,15 @@ def _fail(message: str) -> int:
     return 1
 
 
+def _key_defect(key: str | None) -> str | None:
+    """What is wrong with a key's shape, or None. Never repeats the value."""
+    if not key:
+        return "is empty or not set"
+    if any(c.isspace() or not c.isascii() or not c.isprintable() for c in key):
+        return "contains whitespace, control or non-ASCII characters"
+    return None
+
+
 def hosted_problem(models: list[str], telemetry: bool, environ) -> str | None:
     """Why a batch with hosted models cannot start, or None. Names the variable, never a value."""
     hosted = [m for m in models if remote_client.split_model(m)[0] is not None]
@@ -311,8 +320,9 @@ def hosted_problem(models: list[str], telemetry: bool, environ) -> str | None:
                 "use --no-telemetry")
     for m in hosted:
         var = remote_client.PROVIDERS[remote_client.split_model(m)[0]]["key_env"]
-        if not environ.get(var):
-            return f"environment variable {var} is not set (needed for {m})"
+        defect = _key_defect(environ.get(var))
+        if defect:
+            return f"environment variable {var} {defect} (needed for {m})"
     return None
 
 
@@ -321,8 +331,9 @@ def list_remote_models(provider: str, environ) -> int:
         return _fail(f"unknown provider {provider!r}; known: {sorted(remote_client.PROVIDERS)}")
     var = remote_client.PROVIDERS[provider]["key_env"]
     key = environ.get(var)
-    if not key:
-        return _fail(f"environment variable {var} is not set")
+    defect = _key_defect(key)
+    if defect:
+        return _fail(f"environment variable {var} {defect}")
     try:
         ids = remote_client.list_models(provider, key)
     except remote_client.RemoteModelError as exc:

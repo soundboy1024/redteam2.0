@@ -31,6 +31,7 @@ RETRY_STATUSES = (429, 500, 502, 503, 529)
 BACKOFF_S = (2, 4, 8, 16)
 RETRY_AFTER_CAP_S = 60
 _BODY_SNIPPET = 300
+EMPTY_REPLY_PLACEHOLDER = "(empty reply)"
 _STOP_REASONS = {"end_turn": "stop", "stop_sequence": "stop", "max_tokens": "length"}
 
 # Own session; trust_env=False so traffic never goes via an environment proxy.
@@ -103,13 +104,20 @@ def _send(method: str, provider: str, url: str, api_key: str, timeout_s: int, sl
     send = _SESSION.post if method == "post" else _SESSION.get
     for attempt in range(MAX_ATTEMPTS):
         start = time.perf_counter()
+        fatal = None
         try:
             resp = send(url, **kwargs)
             elapsed = time.perf_counter() - start
             problem, retry_resp = None, resp
-        except requests.RequestException as e:
+        except (requests.ConnectionError, requests.Timeout) as e:
+            # Type name only: str(e) is never logged or raised, so a header value
+            # (the key) that an exception message might carry cannot leak.
             resp, elapsed, retry_resp = None, 0.0, None
-            problem = f"{type(e).__name__}: {_snippet(str(e), api_key)}"
+            problem = type(e).__name__
+        except requests.RequestException as e:
+            fatal = type(e).__name__
+        if fatal is not None:  # raised outside the except block: no chained exception text
+            raise RemoteModelError(f"{provider} request could not be sent: {fatal}")
         if resp is not None:
             if resp.status_code == 200:
                 return resp, elapsed
@@ -190,12 +198,15 @@ def chat(model_name: str, messages: list[dict], *, temperature: float | None, se
     if provider is None:
         raise RemoteModelError(f"{model_name!r} is not a hosted model name")
     if provider == "anthropic":
-        system = ""
         rest = list(messages)
+        body = {"model": model_id, "max_tokens": max_tokens}
         if rest and rest[0].get("role") == "system":
-            system, rest = rest[0]["content"], rest[1:]
-        body = {"model": model_id, "max_tokens": max_tokens, "system": system,
-                "messages": rest}
+            body["system"], rest = rest[0]["content"], rest[1:]
+        # The API rejects empty assistant text; the run log keeps the true empty reply.
+        body["messages"] = [
+            {**m, "content": EMPTY_REPLY_PLACEHOLDER}
+            if m.get("role") == "assistant" and not str(m.get("content", "")).strip() else m
+            for m in rest]
     else:
         body = {"model": model_id, "messages": messages, "max_tokens": max_tokens,
                 "seed": seed, "stream": False}
@@ -214,12 +225,13 @@ def chat(model_name: str, messages: list[dict], *, temperature: float | None, se
         done_reason=done, prompt_token_count=prompt_tokens)
 
 
-def list_models(provider: str, api_key: str, timeout_s: int = 30) -> list[str]:
+def list_models(provider: str, api_key: str, timeout_s: int = 30,
+                sleep=time.sleep) -> list[str]:
     if provider not in PROVIDERS:
         raise RemoteModelError(f"unknown provider {provider!r}; known: {sorted(PROVIDERS)}")
     params = {"limit": 1000} if provider == "anthropic" else None
     resp, _ = _send("get", provider, PROVIDERS[provider]["models_url"], api_key, timeout_s,
-                    time.sleep, params=params)
+                    sleep, params=params)
     data = _json(resp, provider, api_key)
     items = data.get("data") if isinstance(data, dict) else None
     if not isinstance(items, list) or not all(

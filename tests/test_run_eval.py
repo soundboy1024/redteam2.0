@@ -719,3 +719,25 @@ def test_list_remote_models_provider_failure(env, no_keys, monkeypatch, capsys):
     monkeypatch.setattr(run_eval.remote_client, "list_models", boom)
     assert run_eval.main(["--config", cfg_path, "--list-remote-models", "groq"]) == 1
     assert "401" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("bad", ["", "sk-key\n", "sk-key\r", " sk-key", "sk key", "sk-\x01key",
+                                 "sk-kéy"])
+def test_malformed_key_rejected_before_batch(env, no_keys, monkeypatch, capsys, bad):
+    cfg, cfg_path, calls = env
+    monkeypatch.setenv("ANTHROPIC_API_KEY", bad)
+    assert run_eval.main(["--config", cfg_path, "--models", HOSTED,
+                          "--scenarios", "benign_tempting", "--batch-id", "badkey"]) == 1
+    err = capsys.readouterr().err
+    assert "ANTHROPIC_API_KEY" in err and "sk-key" not in err and "sk-k" not in err
+    assert calls["start"] == [] and not os.path.exists(os.path.join(cfg["results_dir"], "badkey"))
+
+
+def test_list_remote_models_rejects_malformed_key(env, no_keys, monkeypatch, capsys):
+    _, cfg_path, _ = env
+    monkeypatch.setenv("GROQ_API_KEY", "sk-secret\n")
+    monkeypatch.setattr(run_eval.remote_client, "list_models",
+                        lambda *a, **k: pytest.fail("must not call the provider"))
+    assert run_eval.main(["--config", cfg_path, "--list-remote-models", "groq"]) == 1
+    err = capsys.readouterr().err
+    assert "GROQ_API_KEY" in err and "sk-secret" not in err
