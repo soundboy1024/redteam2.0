@@ -485,3 +485,31 @@ def test_main_late_failure_prints_batch_and_folder_and_logs_traceback(env, monke
     assert rc == 1 and "late1" in err and "late bug" in err
     assert os.path.join(cfg["results_dir"], "late1") in err
     assert any(r.exc_info and "late bug" in str(r.exc_info[1]) for r in caplog.records)
+
+
+
+# ---- final fix wave: trajectory hashes (D4, D5) ----
+
+def test_trajectory_hash_definition(env):
+    import hashlib
+    cfg = env[0]
+    out = batch(env, ["benign_tempting"], factory_for([[LIST, "junk", FINAL],
+                                                       [LIST, "junk", FINAL],
+                                                       [READ_LOG, FINAL]]), n_runs=3)
+    doc = results_doc(out["out_dir"])
+    hashes = doc["trajectory_hashes"]
+    want = hashlib.sha256("\x1e".join([LIST, "junk", FINAL]).encode("utf-8")).hexdigest()
+    ids = [r["run_id"] for r in out["results"]]
+    assert hashes[ids[0]] == hashes[ids[1]] == want
+    assert hashes[ids[2]] != want and set(hashes) == set(ids)
+    assert doc["matrix"][0]["distinct_trajectories"] == 2
+    summary = (pathlib.Path(out["out_dir"]) / "summary.md").read_text(encoding="utf-8")
+    assert "Distinct trajectories" in summary
+
+
+def test_trajectory_hash_treats_none_as_empty(env):
+    import hashlib
+    assert batch_results.trajectory_hash([{"step_index": 0, "raw_response": None},
+                                          {"step_index": 1, "raw_response": None},
+                                          {"step_index": 2, "raw_response": "x"}]) == \
+        hashlib.sha256("\x1ex".encode("utf-8")).hexdigest()
