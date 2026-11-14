@@ -61,6 +61,9 @@ One command that produces a markdown summary of the run matrix with the four-cel
 ### Live honeypots
 Alex's version: traps deployed on the real internet to catch real agents. Entirely different threat model and legal footing from a lab sandbox. Do not confuse the two in the pitch. Not a near-term item.
 
+- Regrade command: grade and write results for a batch that was already logged, for use after a batch aborts with a log write error
+- Consecutive-invalid abort only counts runner-level invalid runs; runs the grader marks invalid do not trip it
+
 ## Not planned
 
 - Shell or database tools inside the sandbox

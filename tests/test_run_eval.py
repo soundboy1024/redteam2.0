@@ -223,3 +223,87 @@ def test_main_existing_batch_folder_exits_1(env, capsys):
     os.makedirs(os.path.join(cfg["results_dir"], "dup"))
     assert run_eval.main(["--config", cfg_path, "--batch-id", "dup"]) == 1
     assert calls["start"] == []
+
+
+# ---- fix round 1 ----
+
+LIST_ONLY_READS = [LIST, '{"tool": "read_workspace_file", "args": {"filename": "invoices/INV-1041.md"}}',
+                   FINAL]
+
+
+def test_eventless_batch_still_has_both_jsonl_files(env):
+    out = batch(env, ["benign_control"], factory_for([LIST_ONLY_READS]))
+    d = pathlib.Path(out["out_dir"])
+    assert (d / "tool_events.jsonl").is_file()
+    assert (d / "tool_events.jsonl").stat().st_size == 0
+    assert (d / "steps.jsonl").stat().st_size > 0
+
+
+def test_failed_listener_start_removes_batch_folder_and_id_is_reusable(env, monkeypatch):
+    cfg, cfg_path, calls = env
+    good_start = run_eval.start_listener
+
+    def busy(*a):
+        raise RuntimeError("port in use")
+    monkeypatch.setattr(run_eval, "start_listener", busy)
+    with pytest.raises(run_eval.ListenerStartError):
+        batch(env, ["benign_tempting"], factory_for([[FINAL]]), batch_id="again")
+    assert not os.path.exists(os.path.join(cfg["results_dir"], "again"))
+    monkeypatch.setattr(run_eval, "start_listener", good_start)
+    out = batch(env, ["benign_tempting"], factory_for([[FINAL]]), batch_id="again")
+    assert len(out["results"]) == 1
+
+
+@pytest.mark.parametrize("bad", ["CON", "a b"])
+def test_main_bad_batch_id_exits_1_without_traceback(env, capsys, bad):
+    _, cfg_path, calls = env
+    assert run_eval.main(["--config", cfg_path, "--batch-id", bad]) == 1
+    err = capsys.readouterr().err
+    assert err.startswith("error: ") and "invalid batch_id" in err
+    assert calls["start"] == []
+
+
+@pytest.mark.parametrize("flag", ["--models", "--scenarios"])
+def test_main_empty_list_flags_are_errors(env, capsys, flag):
+    _, cfg_path, calls = env
+    assert run_eval.main(["--config", cfg_path, flag, " , "]) == 1
+    assert flag in capsys.readouterr().err
+    assert run_eval.main(["--config", cfg_path, flag, ""]) == 1
+    assert calls["start"] == []
+
+
+@pytest.mark.parametrize("key,value", [("canaries", []), ("listener", {"host": "127.0.0.1", "port": 1})])
+def test_run_batch_rejects_cfg_that_disagrees_with_config_file(env, key, value):
+    cfg, cfg_path, calls = env
+    with pytest.raises(ValueError, match=key):
+        run_eval.run_batch(dict(cfg, **{key: value}), ["m"], ["benign_tempting"], 1, False,
+                           "dis1", factory_for([[FINAL]]), config_path=cfg_path)
+    assert calls["start"] == []
+    assert not os.path.exists(os.path.join(cfg["results_dir"], "dis1"))
+
+
+def test_telemetry_batch_round_trips_real_shaped_logprobs(env):
+    def lp(token, logprob):
+        return {"token": token, "logprob": logprob, "bytes": list(token.encode()),
+                "top_logprobs": [{"token": token, "logprob": logprob, "bytes": list(token.encode())},
+                                 {"token": "x", "logprob": -3.5, "bytes": [120]}]}
+
+    class TeleScript(Script):
+        def __call__(self, messages):
+            r = super().__call__(messages)
+            r.logprobs = [lp("{", 0), lp("final", -0.25), lp("}", -0.5)]
+            return r
+
+    def factory(model, rep):
+        return TeleScript([LIST, READ_LOG, FINAL])
+    cfg, _, _ = env
+    out = run_eval.run_batch(cfg, ["m:1b"], ["benign_tempting"], 1, True, "tele1", factory,
+                             config_path=env[1])
+    (r,) = out["results"]
+    assert r["valid"] and r["telemetry_enabled"] is True
+    from telemetry.logger import read_steps
+    steps = read_steps(cfg["db_path"], r["run_id"])
+    replies = [s for s in steps if s["step_index"] >= 1]
+    assert replies and all(s["mean_logprob"] is not None for s in replies)
+    transcript = (pathlib.Path(out["out_dir"]) / "runs" / f"{r['run_id']}.md").read_text(encoding="utf-8")
+    assert "Telemetry:" in transcript and "mean_logprob=" in transcript

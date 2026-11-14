@@ -92,6 +92,18 @@ def test_zero_eval_duration_gives_none_rate(calls):
     assert call().tokens_per_sec is None
 
 
+@pytest.mark.parametrize("value", [12.0, "12", True, None])
+def test_eval_count_must_be_int(calls, value):
+    calls(FakeResp(body=good_body(eval_count=value)))
+    with pytest.raises(OllamaError, match="eval_count"):
+        call()
+
+
+def test_duration_fields_may_be_float(calls):
+    calls(FakeResp(body=good_body(eval_duration=2e9, total_duration=3.5e9)))
+    assert call().latency_ms == 3500.0
+
+
 @pytest.mark.parametrize("field", ["eval_count", "eval_duration", "total_duration"])
 def test_missing_timing_field_raises(calls, field):
     b = good_body()

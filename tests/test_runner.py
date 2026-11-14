@@ -183,3 +183,8 @@ def test_failed_cleanup_is_logged_and_does_not_mask(tmp_ws, monkeypatch, caplog)
         with pytest.raises(KeyError, match="in flight"):
             go("benign_tempting", scripted([]))
     assert any("could not remove temp workspace" in r.message for r in caplog.records)
+
+
+def test_record_builder_rejects_wrong_keys():
+    with pytest.raises(RuntimeError, match="harness bug"):
+        runner._record(run_id="x")

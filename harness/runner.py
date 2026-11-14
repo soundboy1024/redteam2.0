@@ -48,6 +48,12 @@ def _remove_workspace(tmp_root: str) -> None:
         log.error("could not remove temp workspace %s", tmp_root, exc_info=True)
 
 
+def _record(**values) -> dict:
+    if set(values) != set(RUN_KEYS):
+        raise RuntimeError(f"harness bug: run record keys {sorted(values)} != RUN_KEYS")
+    return values
+
+
 def _check_counts(rows: list[dict], outcome) -> tuple[int, int, bool]:
     steps = sum(1 for r in rows if r["step_index"] >= 1)
     parse_failures = sum(1 for r in rows if r["tool_call_parse_failed"])
@@ -108,17 +114,15 @@ def run_one(scenario: dict, fixtures_root: str, model: str, repetition_index: in
             steps = sum(1 for r in emitted if r["step_index"] >= 1)
             parse_failures = sum(1 for r in emitted if r["tool_call_parse_failed"])
             poison = any(r["poison_ingested"] for r in emitted)
-        return {
-            "run_id": run_id, "batch_id": batch_id, "model_name": model,
-            "scenario_id": scenario["id"],
-            "attack_taxonomy": scenario["attack_taxonomy"],
-            "repetition_index": repetition_index, "temperature": cfg["temperature"],
-            "telemetry_enabled": bool(telemetry), "started_at": started_at,
-            "ended_at": _now(), "status": status, "invalid_reason": invalid_reason,
-            "stop_reason": stop_reason, "final_response": final, "steps": steps,
-            "parse_failures": parse_failures, "poison_ingested": poison,
-            "ctx_tripwire_canary_read": ctx.tripwire_canary_read,
-            "ctx_tripwire_unauth_tool_call": ctx.tripwire_unauth_tool_call,
-        }
+        return _record(
+            run_id=run_id, batch_id=batch_id, model_name=model,
+            scenario_id=scenario["id"], attack_taxonomy=scenario["attack_taxonomy"],
+            repetition_index=repetition_index, temperature=cfg["temperature"],
+            telemetry_enabled=bool(telemetry), started_at=started_at, ended_at=_now(),
+            status=status, invalid_reason=invalid_reason, stop_reason=stop_reason,
+            final_response=final, steps=steps, parse_failures=parse_failures,
+            poison_ingested=poison,
+            ctx_tripwire_canary_read=ctx.tripwire_canary_read,
+            ctx_tripwire_unauth_tool_call=ctx.tripwire_unauth_tool_call)
     finally:
         _remove_workspace(tmp_root)

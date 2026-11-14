@@ -16,7 +16,7 @@ from harness.runner import load_scenarios, run_one
 from listener_proc import start_listener, stop_listener
 from rt_config import ConfigError, load_config
 from telemetry.grader import grade_batch
-from telemetry.logger import (BATCH_ID_RE, log_run, log_step, log_tool_event,
+from telemetry.logger import (JSONL_FILES, log_run, log_step, log_tool_event,
                               open_batch, read_steps, read_tool_events)
 from telemetry.report import (write_results_json, write_summary_md,
                               write_transcript_md)
@@ -74,10 +74,29 @@ def _write_results(cfg, batch_log, batch_id, scenarios, meta):
     return results
 
 
+def _remove_empty_batch(batch_log) -> None:
+    """Undo open_batch after a failed listener start, if nothing was written."""
+    try:
+        names = sorted(os.listdir(batch_log.out_dir))
+        if names != sorted(JSONL_FILES) or any(
+                os.path.getsize(os.path.join(batch_log.out_dir, n)) for n in names):
+            return
+        for n in names:
+            os.remove(os.path.join(batch_log.out_dir, n))
+        os.rmdir(batch_log.out_dir)
+    except OSError:
+        log.error("could not remove empty batch folder %s", batch_log.out_dir, exc_info=True)
+
+
 def run_batch(cfg: dict, models: list[str], scenario_ids: list[str], n_runs: int,
               telemetry: bool, batch_id: str, chat_fn_factory: Callable | None = None,
               *, config_path: str, scenarios_path: str = SCENARIOS_PATH,
               fixtures_root: str = FIXTURES_ROOT) -> dict:
+    file_cfg = load_config(config_path)
+    for key in ("canaries", "listener"):
+        if file_cfg[key] != cfg[key]:
+            raise ValueError(f"cfg and {config_path} disagree on '{key}'; the listener "
+                             "would scan with different settings than the grader uses")
     scenarios = load_scenarios(scenarios_path)
     by_id = {s["id"]: s for s in scenarios}
     chosen = [by_id[i] for i in scenario_ids]  # KeyError on an unknown id
@@ -94,6 +113,7 @@ def run_batch(cfg: dict, models: list[str], scenario_ids: list[str], n_runs: int
         proc = start_listener(os.path.abspath(config_path),
                               os.path.abspath(cfg["listener_db_path"]), host, port)
     except RuntimeError as exc:
+        _remove_empty_batch(batch_log)
         raise ListenerStartError(str(exc)) from exc
     try:
         for model in models:
@@ -160,28 +180,28 @@ def main(argv: list[str] | None = None) -> int:
     if problems:
         return _fail("scenarios invalid:\n  " + "\n  ".join(problems))
     all_ids = [s["id"] for s in load_scenarios(SCENARIOS_PATH)]
-    scenario_ids = _csv(args.scenarios) if args.scenarios else all_ids
+    scenario_ids = all_ids if args.scenarios is None else _csv(args.scenarios)
+    if not scenario_ids:
+        return _fail("--scenarios is empty; give scenario ids or omit the flag")
     unknown = [i for i in scenario_ids if i not in all_ids]
-    if unknown or not scenario_ids:
-        return _fail(f"unknown or empty scenario list {unknown or scenario_ids}; known: {all_ids}")
-    models = _csv(args.models) if args.models else list(cfg["models"])
+    if unknown:
+        return _fail(f"unknown scenario(s) {unknown}; known: {all_ids}")
+    models = list(cfg["models"]) if args.models is None else _csv(args.models)
+    if not models:
+        return _fail("--models is empty; give model names or omit the flag")
     bad_models = [m for m in models if m not in cfg["models"]]
-    if not models or (bad_models and not args.allow_any_model):
-        return _fail(f"unknown or empty model list {bad_models or models}; configured: "
+    if bad_models and not args.allow_any_model:
+        return _fail(f"unknown model(s) {bad_models}; configured: "
                      f"{cfg['models']} (use --allow-any-model to override)")
     n_runs = args.n_runs if args.n_runs is not None else cfg["n_runs"]
     if n_runs < 1:
         return _fail("--n-runs must be at least 1")
     telemetry = cfg["telemetry_enabled"] if args.telemetry is None else args.telemetry
     batch_id = args.batch_id or _utc_stamp()
-    if not BATCH_ID_RE.fullmatch(batch_id):
-        return _fail(f"invalid batch id {batch_id!r}")
-    if os.path.exists(os.path.join(cfg["results_dir"], batch_id)):
-        return _fail(f"batch folder for {batch_id!r} already exists; use a new batch id")
     try:
         out = run_batch(cfg, models, scenario_ids, n_runs, telemetry, batch_id,
                         config_path=args.config)
-    except (ListenerStartError, LogWriteError) as exc:
+    except (ListenerStartError, LogWriteError, ValueError) as exc:
         return _fail(str(exc))
     print(f"summary: {os.path.join(out['out_dir'], 'summary.md')}")
     for r in out["results"]:

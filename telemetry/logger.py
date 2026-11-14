@@ -19,6 +19,7 @@ from telemetry.schema import (AGENT_STATES, BOOL_COLUMNS, DDL, INTEGER_COLUMNS,
 INT64_MIN, INT64_MAX = -(2 ** 63), 2 ** 63 - 1
 MAX_DETAIL_DEPTH = 50
 CIRCULAR = "<circular>"
+JSONL_FILES = ("steps.jsonl", "tool_events.jsonl")
 BATCH_ID_RE = re.compile(r"[A-Za-z0-9_-]{1,64}")
 RESERVED_NAMES = {"CON", "PRN", "AUX", "NUL",
                   *(f"COM{i}" for i in range(1, 10)), *(f"LPT{i}" for i in range(1, 10))}
@@ -165,6 +166,8 @@ def open_batch(db_path: str, results_dir: str, batch_id: str) -> BatchLog:
     if os.path.exists(out_dir):
         raise ValueError(f"batch folder {out_dir} already exists; use a new batch_id")
     os.makedirs(out_dir)
+    for name in JSONL_FILES:  # always present, so a missing file means a lost write
+        open(os.path.join(out_dir, name), "x", encoding="utf-8").close()
     parent = os.path.dirname(db_path)
     if parent:
         os.makedirs(parent, exist_ok=True)

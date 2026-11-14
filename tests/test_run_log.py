@@ -71,6 +71,12 @@ def test_open_batch_creates_dir_and_tables(log):
     assert count(log.db_path, "steps") == 0
 
 
+def test_open_batch_creates_both_empty_jsonl_files(log):
+    for name in ("steps.jsonl", "tool_events.jsonl"):
+        path = os.path.join(log.out_dir, name)
+        assert os.path.isfile(path) and os.path.getsize(path) == 0
+
+
 @pytest.mark.parametrize("bad", ["", "a/b", "a\\b", "..", "x..y", "C:x", "../up", "a b",
                                  "a.b", "x" * 65, "con", "NUL", "Com1", "lpt9", None, 5, "abc\n", "con\n"])
 def test_open_batch_rejects_bad_ids(tmp_path, bad):
@@ -155,6 +161,7 @@ def test_step_bad_values(log, over):
 
 
 def test_step_jsonl_failure_raises_after_sqlite(log):
+    os.remove(os.path.join(log.out_dir, "steps.jsonl"))  # created empty by open_batch
     os.makedirs(os.path.join(log.out_dir, "steps.jsonl"))
     with pytest.raises(OSError):
         logger.log_step(log, make_step())
@@ -193,6 +200,7 @@ def test_tool_event_bad(log):
 
 
 def test_tool_event_jsonl_failure_raises(log):
+    os.remove(os.path.join(log.out_dir, "tool_events.jsonl"))  # created empty by open_batch
     os.makedirs(os.path.join(log.out_dir, "tool_events.jsonl"))
     with pytest.raises(OSError):
         logger.log_tool_event(log, "r1", {"event": "x"})

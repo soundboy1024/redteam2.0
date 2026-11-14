@@ -100,8 +100,10 @@ def chat(host: str, model: str, messages: list[dict], *, temperature: float, see
         raise OllamaError(f"ollama response lacks message.content string: {_snippet(resp.text)}")
     for field in ("eval_count", "eval_duration", "total_duration"):
         v = data.get(field)
-        if isinstance(v, bool) or not isinstance(v, (int, float)):
-            raise OllamaError(f"ollama response missing timing field {field}: {_snippet(resp.text)}")
+        ok = isinstance(v, int) if field == "eval_count" else isinstance(v, (int, float))
+        if isinstance(v, bool) or not ok:
+            raise OllamaError(f"ollama response has bad timing field {field}={v!r}: "
+                              f"{_snippet(resp.text)}")
     logprobs = None
     if telemetry:
         logprobs = data.get("logprobs")
