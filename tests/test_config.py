@@ -116,3 +116,43 @@ def test_temperature_bounds_accepted(tmp_path):
     cfg = _valid(tmp_path)
     cfg["temperatures"] = [0, 0.5, 2]
     assert load_config(_write(tmp_path, cfg))["temperatures"] == [0, 0.5, 2]
+
+
+def test_remote_config_values():
+    cfg = load_config("config.yaml")
+    assert cfg["remote_models"] == ["anthropic/claude-haiku-5-5", "anthropic/claude-sonnet-5-5",
+                                    "anthropic/claude-opus-5-5", "anthropic/claude-haiku-4-5"]
+    assert cfg["remote_max_tokens"] == 4096 and cfg["remote_timeout_s"] == 120
+    assert not set(cfg["models"]) & set(cfg["remote_models"])
+
+
+@pytest.mark.parametrize("key", ["remote_models", "remote_max_tokens", "remote_timeout_s"])
+def test_remote_keys_required(tmp_path, key):
+    cfg = _valid(tmp_path)
+    del cfg[key]
+    with pytest.raises(ConfigError, match=key):
+        load_config(_write(tmp_path, cfg))
+
+
+def test_remote_models_may_be_empty(tmp_path):
+    cfg = _valid(tmp_path)
+    cfg["remote_models"] = []
+    assert load_config(_write(tmp_path, cfg))["remote_models"] == []
+
+
+@pytest.mark.parametrize("value", [["openai/x"], ["llama3.2:3b"], ["anthropic/"], [5], "groq/x",
+                                   ["groq/x", "groq/x"], None])
+def test_remote_models_validated(tmp_path, value):
+    cfg = _valid(tmp_path)
+    cfg["remote_models"] = value
+    with pytest.raises(ConfigError, match="remote_models"):
+        load_config(_write(tmp_path, cfg))
+
+
+@pytest.mark.parametrize("key", ["remote_max_tokens", "remote_timeout_s"])
+@pytest.mark.parametrize("value", [0, -1, 1.5, "10", True, None])
+def test_remote_numbers_validated(tmp_path, key, value):
+    cfg = _valid(tmp_path)
+    cfg[key] = value
+    with pytest.raises(ConfigError, match=key):
+        load_config(_write(tmp_path, cfg))

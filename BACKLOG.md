@@ -68,8 +68,10 @@ One command that produces a markdown summary of the run matrix with the four-cel
 ### Live honeypots
 Alex's version: traps deployed on the real internet to catch real agents. Entirely different threat model and legal footing from a lab sandbox. Do not confuse the two in the pitch. Not a near-term item.
 
+### Per-model token and cost totals
+Add per-model token totals (prompt and completion) and an estimated cost to the batch summary, now that hosted models bill by the token. Needs a price table kept outside the code path that grades.
+
 ## Not planned
 
 - Shell or database tools inside the sandbox
-- Remote or hosted models
 - Any LLM-as-judge grading, ever

@@ -3,11 +3,13 @@ import math
 
 import yaml
 
+from harness.remote_client import PROVIDERS, split_model
+
 REQUIRED_KEYS = (
     "ollama_host", "models", "n_runs", "temperatures", "telemetry_enabled",
     "max_steps", "listener", "db_path", "listener_db_path", "canaries",
     "num_ctx", "num_predict", "ollama_timeout_s", "results_dir",
-    "max_consecutive_invalid",
+    "max_consecutive_invalid", "remote_models", "remote_max_tokens", "remote_timeout_s",
 )
 CANARY_FIELDS = ("id", "fixture", "file", "token")
 
@@ -28,6 +30,23 @@ def _check_temperatures(value, path: str) -> None:
         raise ConfigError(f"{path}: temperatures has duplicates: {value!r}")
 
 
+def _check_remote(cfg: dict, path: str) -> None:
+    models = cfg["remote_models"]
+    if not isinstance(models, list):
+        raise ConfigError(f"{path}: remote_models must be a list, got {models!r}")
+    for m in models:
+        provider, model_id = split_model(m) if isinstance(m, str) else (None, "")
+        if provider is None or not model_id.strip():
+            raise ConfigError(f"{path}: remote_models entry {m!r} must look like "
+                              f"<provider>/<model id> with provider in {sorted(PROVIDERS)}")
+    if len(set(models)) != len(models):
+        raise ConfigError(f"{path}: remote_models has duplicates: {models!r}")
+    for key in ("remote_max_tokens", "remote_timeout_s"):
+        v = cfg[key]
+        if isinstance(v, bool) or not isinstance(v, int) or v < 1:
+            raise ConfigError(f"{path}: {key} must be a positive integer, got {v!r}")
+
+
 def load_config(path: str) -> dict:
     try:
         with open(path, encoding="utf-8") as f:
@@ -45,6 +64,7 @@ def load_config(path: str) -> dict:
         if key not in cfg:
             raise ConfigError(f"{path}: missing required key '{key}'")
     _check_temperatures(cfg["temperatures"], path)
+    _check_remote(cfg, path)
     listener = cfg["listener"]
     if not isinstance(listener, dict):
         raise ConfigError("listener: must be a mapping")

@@ -13,7 +13,8 @@ from fastapi.testclient import TestClient
 
 from harness import runner, tools
 from harness.agent_loop import AgentOutcome
-from harness.ollama_client import ChatResult, OllamaError
+from harness.ollama_client import ChatResult, ModelError, OllamaError
+from harness.remote_client import RemoteModelError
 from harness.runner import load_scenarios, run_one
 from rt_config import load_config
 from telemetry.schema import RUN_COLUMNS, STEP_COLUMNS
@@ -79,6 +80,13 @@ def tree_hash(root):
         if p.is_file():
             h.update(p.read_bytes())
     return h.hexdigest()
+
+
+def test_remote_model_error_is_an_invalid_run():
+    rows = []
+    rec = go("benign_tempting", scripted([LIST, RemoteModelError("rate limited")]), rows)
+    assert rec["status"] == "invalid" and rec["stop_reason"] == "error"
+    assert rec["invalid_reason"] == "RemoteModelError: rate limited"
 
 
 def test_record_keys_match_run_columns(tmp_ws):
@@ -159,7 +167,7 @@ def test_scenario_error_from_missing_canary_file_is_invalid(tmp_ws):
 
 
 def test_infra_errors_are_exactly_the_three():
-    assert runner.INFRA_ERRORS == (tools.ListenerUnreachable, OllamaError, tools.ScenarioError)
+    assert runner.INFRA_ERRORS == (tools.ListenerUnreachable, ModelError, tools.ScenarioError)
 
 
 def test_bare_value_error_is_a_harness_bug_and_propagates(tmp_ws, monkeypatch):

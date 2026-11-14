@@ -219,6 +219,30 @@ where the p_i are the returned alternatives renormalized to sum to one. Because 
 
 Telemetry is behind a config flag and off by default. The tripwires must work with telemetry off. Verify at Gate 3 that Ollama returns usable logprobs for tool-call JSON before turning it on.
 
+### 4.7 Hosted model clients (harness/remote_client.py)
+
+Hosted models are allowed, over raw HTTP through `requests` (no SDK, no new dependency).
+
+Providers and fixed endpoints (HTTPS constants in code; nothing but the model id is configurable):
+    anthropic   https://api.anthropic.com/v1/messages          (models: /v1/models)
+    groq        https://api.groq.com/openai/v1/chat/completions (models: /openai/v1/models)
+    cerebras    https://api.cerebras.ai/v1/chat/completions    (models: /v1/models)
+A model name `anthropic/<id>`, `groq/<id>` or `cerebras/<id>` is hosted; every other name is a local Ollama model. `config.yaml` lists the hosted names in `remote_models`, with `remote_max_tokens` and `remote_timeout_s`. The default batch (`models`) stays local-only; hosted models are chosen with `--models`.
+
+Key handling. Keys come from the environment only (`ANTHROPIC_API_KEY`, `GROQ_API_KEY`, `CEREBRAS_API_KEY`), read in run_eval.py and passed to the client as an argument. A key is never written to config, logs, the run log, results, batch metadata or an exception message. A missing key stops the batch before it opens, naming the variable. `run_eval.py --list-remote-models <provider>` asks the provider for its model ids with the key; it starts no listener and opens no batch.
+
+Same reply protocol as 4.0: one plain JSON object per turn parsed by the harness. No native tool calling, so hosted and local results stay comparable.
+
+Temperature and thinking. Current Claude models reject a temperature setting (HTTP 400). A model that does not accept one (`accepts_temperature` false) runs once per repetition with no temperature, recorded as null and shown as "default". `claude-haiku-4-5`, `claude-sonnet-4-6` and `claude-opus-4-6` accept it and get the full list; Groq and Cerebras models always do. No thinking or effort setting is sent: provider defaults, and the summary says so and says repetitions are not guaranteed reproducible. Thinking counts against the output limit, so hosted calls use `remote_max_tokens` instead of `num_predict`; only text content blocks are read.
+
+Refusals. A hosted refusal is model behaviour, not an infrastructure fault: it comes back as an empty reply with the provider's stop reason as `done_reason` and is logged as a parse failure. There is no fallback to another model.
+
+Retry. Statuses 429, 500, 502, 503, 529 and connection or timeout errors are retried, five attempts in total, waiting the numeric `retry-after` (capped at 60 s) or else 2, 4, 8, 16 s; each retry is logged at WARNING. After that, or on any other non-200 status, a redirect, a non-JSON body or a body missing the expected fields, `RemoteModelError` is raised and the run is invalid, like an Ollama error. Both error classes derive from `ModelError`.
+
+Telemetry is local-only: logprobs are never requested from a hosted model, and telemetry on with a hosted model is refused before the batch opens.
+
+Only fake fixture data is sent to a provider. Fixtures and canaries are fake by construction; never point a hosted model at real files or credentials.
+
 ## 5. Directory layout
 
     redteam2/
@@ -238,6 +262,7 @@ Telemetry is behind a config flag and off by default. The tripwires must work wi
                 authority_spoof/
         harness/
             ollama_client.py
+            remote_client.py
             tools.py
             agent_loop.py
             runner.py
@@ -292,6 +317,6 @@ The thirty second version. An innocent looking log file. A hidden instruction in
 
 ## 8. Out of scope for this version
 
-Everything in BACKLOG.md. Read it once so you recognize an idea when it comes up, then do not implement from it. Shell tools, database tools, remote models and LLM-as-judge grading are permanently out, not deferred.
+Everything in BACKLOG.md. Read it once so you recognize an idea when it comes up, then do not implement from it. Shell tools, database tools and LLM-as-judge grading are permanently out, not deferred. Hosted models are in scope under 4.7.
 
 If the director asks for a backlog item mid-phase, confirm which phase it belongs to and that the current gate has passed before starting it.

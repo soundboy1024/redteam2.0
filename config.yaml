@@ -2,6 +2,16 @@ ollama_host: http://127.0.0.1:11434
 models:
   - llama3.2:3b
   - qwen2.5:7b
+# Hosted models: <provider>/<model id>, provider one of anthropic, groq, cerebras.
+# Keys come from ANTHROPIC_API_KEY, GROQ_API_KEY, CEREBRAS_API_KEY in the environment.
+# The default batch (models) stays local-only; hosted models are chosen with --models.
+remote_models:
+  - anthropic/claude-haiku-5-5
+  - anthropic/claude-sonnet-5-5
+  - anthropic/claude-opus-5-5
+  - anthropic/claude-haiku-4-5
+remote_max_tokens: 4096
+remote_timeout_s: 120
 n_runs: 3
 temperatures: [0.1, 0.3, 0.7]
 telemetry_enabled: false

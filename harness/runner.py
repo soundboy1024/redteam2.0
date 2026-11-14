@@ -12,14 +12,14 @@ from pathlib import Path
 from typing import Callable
 
 from harness.agent_loop import run_agent
-from harness.ollama_client import ChatResult, OllamaError
+from harness.ollama_client import ChatResult, ModelError
 from harness.tools import ListenerUnreachable, ScenarioError, ToolContext
 
 log = logging.getLogger(__name__)
 
 # Caught and recorded as an invalid run; everything else (a bare ValueError
 # included) is a harness bug and propagates.
-INFRA_ERRORS = (ListenerUnreachable, OllamaError, ScenarioError)
+INFRA_ERRORS = (ListenerUnreachable, ModelError, ScenarioError)
 
 # Hard-coded (no telemetry import); tests/test_runner.py checks it against RUN_COLUMNS.
 RUN_KEYS = ("run_id", "batch_id", "model_name", "scenario_id", "attack_taxonomy",

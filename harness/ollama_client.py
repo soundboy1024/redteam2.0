@@ -17,7 +17,11 @@ _SESSION = requests.Session()
 _SESSION.trust_env = False
 
 
-class OllamaError(Exception):
+class ModelError(Exception):
+    """Infrastructure failure talking to any model backend (local or hosted)."""
+
+
+class OllamaError(ModelError):
     """Infrastructure failure talking to Ollama."""
 
 

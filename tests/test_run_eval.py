@@ -594,3 +594,128 @@ def test_cli_temperatures_flag_invalid(env, capsys, value):
     assert run_eval.main(["--config", cfg_path, "--scenarios", "benign_tempting",
                           "--temperatures", value]) == 1
     assert "--temperatures" in capsys.readouterr().err and calls["start"] == []
+
+
+# ---- hosted models ----
+
+HOSTED = "anthropic/claude-haiku-5-5"
+ALL_KEYS = ("ANTHROPIC_API_KEY", "GROQ_API_KEY", "CEREBRAS_API_KEY")
+
+
+@pytest.fixture
+def no_keys(monkeypatch):
+    for var in ALL_KEYS:
+        monkeypatch.delenv(var, raising=False)
+
+
+def test_temperatures_for():
+    assert run_eval.temperatures_for(HOSTED, [0.1, 0.7]) == [None]
+    assert run_eval.temperatures_for("anthropic/claude-haiku-4-5", [0.1, 0.7]) == [0.1, 0.7]
+    assert run_eval.temperatures_for("groq/x", [0.1]) == [0.1]
+    assert run_eval.temperatures_for("llama3.2:3b", [0.1, 0.7]) == [0.1, 0.7]
+
+
+def test_missing_key_stops_before_batch(env, no_keys, capsys):
+    cfg, cfg_path, calls = env
+    assert run_eval.main(["--config", cfg_path, "--models", HOSTED,
+                          "--scenarios", "benign_tempting", "--batch-id", "nokey"]) == 1
+    assert "ANTHROPIC_API_KEY" in capsys.readouterr().err
+    assert calls["start"] == []
+    assert not os.path.exists(os.path.join(cfg["results_dir"], "nokey"))
+
+
+def test_telemetry_with_hosted_model_refused(env, no_keys, monkeypatch, capsys):
+    cfg, cfg_path, calls = env
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test-key")
+    assert run_eval.main(["--config", cfg_path, "--models", HOSTED, "--telemetry",
+                          "--scenarios", "benign_tempting", "--batch-id", "tele"]) == 1
+    err = capsys.readouterr().err
+    assert "telemetry" in err and "sk-test-key" not in err
+    assert calls["start"] == [] and not os.path.exists(os.path.join(cfg["results_dir"], "tele"))
+
+
+def test_hosted_model_is_known_without_allow_flag(env, no_keys, monkeypatch, capsys):
+    _, cfg_path, calls = env
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test-key")
+    monkeypatch.setattr(run_eval, "_default_chat_fn_factory",
+                        lambda cfg, tele: factory_for(default=[FINAL]))
+    rc = run_eval.main(["--config", cfg_path, "--models", HOSTED, "--n-runs", "1",
+                        "--scenarios", "benign_tempting", "--batch-id", "hosted1"])
+    assert rc == 0 and len(calls["start"]) == 1
+    summary = (pathlib.Path(env[0]["results_dir"]) / "hosted1" / "summary.md").read_text("utf-8")
+    assert "provider defaults" in summary and "not guaranteed" in summary
+    assert f"without a temperature setting: {HOSTED}" in summary
+    assert "| default |" in summary
+
+
+def test_local_batch_summary_has_no_hosted_line(env):
+    out = batch(env, ["benign_tempting"], factory_for([[FINAL]]))
+    text = (pathlib.Path(out["out_dir"]) / "summary.md").read_text("utf-8")
+    assert "provider defaults" not in text
+
+
+def test_hosted_model_without_temperature_runs_once_per_rep(env):
+    cfg, cfg_path, _ = env
+    out = run_eval.run_batch(cfg, [HOSTED], ["benign_tempting"], 2, False, "h1",
+                             factory_for(default=[FINAL]), temperatures=[0.1, 0.7],
+                             config_path=cfg_path)
+    assert len(out["results"]) == 2
+    assert [r["temperature"] for r in out["results"]] == [None, None]
+
+
+def test_default_factory_routes_hosted_without_leaking_key(env, monkeypatch):
+    cfg, _, _ = env
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test-key")
+    seen = {}
+
+    def fake_chat(model, messages, **kw):
+        seen.update(model=model, **kw)
+        return ChatResult(content=FINAL, logprobs=None, token_count=1, latency_ms=1.0,
+                          tokens_per_sec=None, done_reason="stop")
+    monkeypatch.setattr(run_eval.remote_client, "chat", fake_chat)
+    fn = run_eval._default_chat_fn_factory(cfg, False)(HOSTED, 2, None)
+    assert "sk-test-key" not in repr(fn)
+    fn([{"role": "user", "content": "x"}])
+    assert seen["model"] == HOSTED and seen["seed"] == 2 and seen["temperature"] is None
+    assert seen["max_tokens"] == cfg["remote_max_tokens"]
+    assert seen["timeout_s"] == cfg["remote_timeout_s"] and seen["api_key"] == "sk-test-key"
+
+
+def test_default_factory_refuses_none_temperature_for_local_model(env):
+    cfg, _, _ = env
+    with pytest.raises(ValueError, match="no temperature"):
+        run_eval._default_chat_fn_factory(cfg, False)("llama3.2:3b", 0, None)
+
+
+def test_list_remote_models(env, no_keys, monkeypatch, capsys):
+    _, cfg_path, calls = env
+    monkeypatch.setenv("GROQ_API_KEY", "sk-test-key")
+    seen = {}
+
+    def fake_list(provider, key, timeout_s=30):
+        seen.update(provider=provider, key=key)
+        return ["a", "b"]
+    monkeypatch.setattr(run_eval.remote_client, "list_models", fake_list)
+    assert run_eval.main(["--config", cfg_path, "--list-remote-models", "groq"]) == 0
+    assert capsys.readouterr().out == "a\nb\n" and seen == {"provider": "groq", "key": "sk-test-key"}
+    assert calls["start"] == [] and not os.path.exists(env[0]["results_dir"])
+
+
+def test_list_remote_models_errors(env, no_keys, capsys):
+    _, cfg_path, calls = env
+    assert run_eval.main(["--config", cfg_path, "--list-remote-models", "openai"]) == 1
+    assert "unknown provider" in capsys.readouterr().err
+    assert run_eval.main(["--config", cfg_path, "--list-remote-models", "groq"]) == 1
+    assert "GROQ_API_KEY" in capsys.readouterr().err
+    assert calls["start"] == []
+
+
+def test_list_remote_models_provider_failure(env, no_keys, monkeypatch, capsys):
+    _, cfg_path, _ = env
+    monkeypatch.setenv("GROQ_API_KEY", "sk-test-key")
+
+    def boom(provider, key, timeout_s=30):
+        raise run_eval.remote_client.RemoteModelError("HTTP 401: denied")
+    monkeypatch.setattr(run_eval.remote_client, "list_models", boom)
+    assert run_eval.main(["--config", cfg_path, "--list-remote-models", "groq"]) == 1
+    assert "401" in capsys.readouterr().err

@@ -2,6 +2,7 @@
 
 Usage: .venv/Scripts/python.exe run_eval.py [--config config.yaml] [--models a,b]
        [--scenarios id,id] [--n-runs N] [--temperatures 0.1,0.3] [--telemetry|--no-telemetry] [--batch-id ID]
+       .venv/Scripts/python.exe run_eval.py --list-remote-models anthropic|groq|cerebras
 """
 import argparse
 import logging
@@ -14,7 +15,7 @@ from functools import partial
 from typing import Callable
 
 from batch_results import LogWriteError, write_batch_results
-from harness import ollama_client
+from harness import ollama_client, remote_client
 from harness.agent_loop import SYSTEM_PROMPT
 from harness.runner import load_scenarios, run_one
 from listener_proc import start_listener, stop_listener
@@ -51,7 +52,10 @@ class PreparedBatch:
 
 
 def temperatures_for(model: str, temperatures: list) -> list:
-    """The temperatures a model is run at. Every model takes them all for now."""
+    """The temperatures a model is run at. A model that rejects a temperature setting
+    runs once per repetition with none (None, shown as "default")."""
+    if not remote_client.accepts_temperature(model):
+        return [None]
     return list(temperatures)
 
 
@@ -74,8 +78,29 @@ def _guard(fn: Callable) -> Callable:
     return wrapped
 
 
+def _hosted_chat_fn(cfg: dict, model: str, seed: int, temperature: float | None,
+                    api_key: str) -> Callable:
+    """A closure, not a partial: its repr never shows the key."""
+    def chat_fn(messages: list[dict]):
+        return remote_client.chat(model, messages, temperature=temperature, seed=seed,
+                                  max_tokens=cfg["remote_max_tokens"],
+                                  timeout_s=cfg["remote_timeout_s"], api_key=api_key)
+    return chat_fn
+
+
 def _default_chat_fn_factory(cfg: dict, telemetry: bool) -> Callable:
     def factory(model: str, repetition_index: int, temperature: float | None):
+        provider, _ = remote_client.split_model(model)
+        if provider is not None:
+            if telemetry:
+                raise ValueError(f"telemetry is local-only; refusing hosted model {model!r}")
+            key = os.environ.get(remote_client.PROVIDERS[provider]["key_env"], "")
+            if not key:
+                raise ValueError(f"{remote_client.PROVIDERS[provider]['key_env']} is not set")
+            return _hosted_chat_fn(cfg, model, repetition_index, temperature, key)
+        if temperature is None:
+            raise ValueError(f"local model {model!r} was given no temperature; only hosted "
+                             "models that reject one may run without")
         return partial(ollama_client.chat, cfg["ollama_host"], model,
                        temperature=temperature, seed=repetition_index,
                        num_ctx=cfg["num_ctx"], num_predict=cfg["num_predict"],
@@ -197,6 +222,10 @@ def execute_batch(prep: PreparedBatch) -> dict:
     meta = {"batch_id": batch_log.batch_id, "models": prep.models,
             "scenario_ids": prep.scenario_ids, "n_runs": prep.n_runs,
             "temperatures": prep.temperatures, "telemetry_enabled": prep.telemetry,
+            "hosted_models": [m for m in prep.models
+                              if remote_client.split_model(m)[0] is not None],
+            "models_without_temperature": [m for m in prep.models
+                                           if not remote_client.accepts_temperature(m)],
             "started_at": started_at, "ended_at": _now(), "aborted": state["aborted"],
             "abort_reason": state["abort_reason"]}
     if error is None:
@@ -260,6 +289,8 @@ def _parser() -> argparse.ArgumentParser:
     p.add_argument("--telemetry", dest="telemetry", action="store_true", default=None)
     p.add_argument("--no-telemetry", dest="telemetry", action="store_false")
     p.add_argument("--batch-id", default=None)
+    p.add_argument("--list-remote-models", metavar="PROVIDER",
+                   help="print the model ids a provider offers (needs its key) and exit")
     p.add_argument("--allow-any-model", action="store_true",
                    help="accept a model name that is not in config.yaml")
     return p
@@ -270,6 +301,37 @@ def _fail(message: str) -> int:
     return 1
 
 
+def hosted_problem(models: list[str], telemetry: bool, environ) -> str | None:
+    """Why a batch with hosted models cannot start, or None. Names the variable, never a value."""
+    hosted = [m for m in models if remote_client.split_model(m)[0] is not None]
+    if not hosted:
+        return None
+    if telemetry:
+        return (f"telemetry is local-only and cannot be used with hosted model(s) {hosted}; "
+                "use --no-telemetry")
+    for m in hosted:
+        var = remote_client.PROVIDERS[remote_client.split_model(m)[0]]["key_env"]
+        if not environ.get(var):
+            return f"environment variable {var} is not set (needed for {m})"
+    return None
+
+
+def list_remote_models(provider: str, environ) -> int:
+    if provider not in remote_client.PROVIDERS:
+        return _fail(f"unknown provider {provider!r}; known: {sorted(remote_client.PROVIDERS)}")
+    var = remote_client.PROVIDERS[provider]["key_env"]
+    key = environ.get(var)
+    if not key:
+        return _fail(f"environment variable {var} is not set")
+    try:
+        ids = remote_client.list_models(provider, key)
+    except remote_client.RemoteModelError as exc:
+        return _fail(f"listing {provider} models failed: {exc}")
+    for model_id in ids:
+        print(model_id)
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
     args = _parser().parse_args(argv)
@@ -277,6 +339,8 @@ def main(argv: list[str] | None = None) -> int:
         cfg = load_config(args.config)
     except ConfigError as exc:
         return _fail(f"config: {exc}")
+    if args.list_remote_models is not None:
+        return list_remote_models(args.list_remote_models, os.environ)
     problems = validate(SCENARIOS_PATH, args.config)
     if problems:
         return _fail("scenarios invalid:\n  " + "\n  ".join(problems))
@@ -290,10 +354,11 @@ def main(argv: list[str] | None = None) -> int:
     models = list(cfg["models"]) if args.models is None else _csv(args.models)
     if not models:
         return _fail("--models is empty; give model names or omit the flag")
-    bad_models = [m for m in models if m not in cfg["models"]]
+    known = list(cfg["models"]) + list(cfg["remote_models"])
+    bad_models = [m for m in models if m not in known]
     if bad_models and not args.allow_any_model:
         return _fail(f"unknown model(s) {bad_models}; configured: "
-                     f"{cfg['models']} (use --allow-any-model to override)")
+                     f"{known} (use --allow-any-model to override)")
     n_runs = args.n_runs if args.n_runs is not None else cfg["n_runs"]
     if n_runs < 1:
         return _fail("--n-runs must be at least 1")
@@ -303,6 +368,9 @@ def main(argv: list[str] | None = None) -> int:
     except ValueError as exc:
         return _fail(str(exc))
     telemetry = cfg["telemetry_enabled"] if args.telemetry is None else args.telemetry
+    problem = hosted_problem(models, telemetry, os.environ)
+    if problem:
+        return _fail(problem)
     batch_id = args.batch_id or _utc_stamp()
     try:
         prep = prepare_batch(cfg, models, scenario_ids, n_runs, telemetry, batch_id,
