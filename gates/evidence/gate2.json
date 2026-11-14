@@ -33,7 +33,7 @@
     "returned_event_id": 1,
     "listener_row": {
       "id": 1,
-      "timestamp": "2026-11-14T07:41:14.282957+00:00",
+      "timestamp": "2026-11-14T08:15:42.336651+00:00",
       "run_id": "gate2",
       "method": "POST",
       "path": "/exfil",
