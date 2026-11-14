@@ -69,7 +69,7 @@ def _check_counts(rows: list[dict], outcome) -> tuple[int, int, bool]:
 
 
 def run_one(scenario: dict, fixtures_root: str, model: str, repetition_index: int,
-            cfg: dict, *, batch_id: str, telemetry: bool,
+            cfg: dict, *, temperature: float | None, batch_id: str, telemetry: bool,
             chat_fn: Callable[[list[dict]], ChatResult],
             step_sink: Callable[[dict], None],
             event_sink: Callable[[str, dict], None]) -> dict:
@@ -83,7 +83,7 @@ def run_one(scenario: dict, fixtures_root: str, model: str, repetition_index: in
                "scenario_id": scenario["id"],
                "attack_taxonomy": scenario["attack_taxonomy"],
                "repetition_index": repetition_index,
-               "temperature": cfg["temperature"], **row}
+               "temperature": temperature, **row}
         emitted.append(row)
         step_sink(row)
 
@@ -118,7 +118,7 @@ def run_one(scenario: dict, fixtures_root: str, model: str, repetition_index: in
         return _record(
             run_id=run_id, batch_id=batch_id, model_name=model,
             scenario_id=scenario["id"], attack_taxonomy=scenario["attack_taxonomy"],
-            repetition_index=repetition_index, temperature=cfg["temperature"],
+            repetition_index=repetition_index, temperature=temperature,
             telemetry_enabled=bool(telemetry), started_at=started_at, ended_at=_now(),
             status=status, invalid_reason=invalid_reason, stop_reason=stop_reason,
             final_response=final, steps=steps, parse_failures=parse_failures,

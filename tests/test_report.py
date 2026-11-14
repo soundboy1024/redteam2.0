@@ -16,7 +16,7 @@ RESULT_KEYS = (
     "attempted_tripwires", "attempted_canary_ids", "reply_canary_ids")
 
 META = {"batch_id": "b1", "models": ["m1", "m2"], "scenario_ids": ["s1"], "n_runs": 2,
-        "temperature": 0.0, "telemetry_enabled": False,
+        "temperatures": [0.0], "telemetry_enabled": False,
         "started_at": "2026-11-14T00:00:00+00:00", "ended_at": "2026-11-14T01:00:00+00:00",
         "aborted": False}
 
@@ -340,11 +340,11 @@ def test_matrix_missing_hash_for_valid_run_raises():
 
 
 def table_row(text, taxonomy):
-    return next(line for line in text.splitlines() if line.startswith(f"| {taxonomy} |"))
+    return next(line for line in text.splitlines() if line.startswith("| ") and f" | {taxonomy} |" in line)
 
 
 def header_cells(text):
-    return next(line for line in text.splitlines() if line.startswith("| Taxonomy |")).split(
+    return next(line for line in text.splitlines() if line.startswith("| Temp |")).split(
         " | ")
 
 
@@ -379,8 +379,9 @@ LIMIT_1 = ("Cells reflect executed actions only. A reply that failed to parse wa
            "that never ran. A \"clean\" cell means no tripwire fired on an executed action.")
 LIMIT_2 = ("A \"failed\" cell means the completion check did not match. It does not "
            "distinguish a wrong answer from a right answer given in the wrong form.")
-TEMP_NOTE = ("Temperature is 0, so repetitions of the same model and scenario are expected to "
-             "be identical and are not independent samples.")
+TEMP_NOTE = ("Temperature 0 is among the batch temperatures, so repetitions of the "
+             "same model, scenario and temperature 0 are expected to be identical "
+             "and are not independent samples.")
 
 
 def test_limitations_verbatim(tmp_path):
@@ -389,10 +390,11 @@ def test_limitations_verbatim(tmp_path):
     assert LIMIT_1 in lim and LIMIT_2 in lim
 
 
-@pytest.mark.parametrize("temp,n_runs,shown", [(0.0, 2, True), (0, 3, True), (0.0, 1, False),
-                                               (0.7, 3, False)])
-def test_temperature_zero_note(tmp_path, temp, n_runs, shown):
-    meta = dict(META, temperature=temp, n_runs=n_runs)
+@pytest.mark.parametrize("temps,n_runs,shown", [
+    ([0.0], 2, True), ([0], 3, True), ([0.7, 0.0], 2, True), ([0.0], 1, False),
+    ([0.7], 3, False), ([None, 0.7], 3, False)])
+def test_temperature_zero_note(tmp_path, temps, n_runs, shown):
+    meta = dict(META, temperatures=temps, n_runs=n_runs)
     text = read(write_summary_md(str(tmp_path), meta, eight()))
     assert (TEMP_NOTE in text) is shown
     if shown:
@@ -466,3 +468,34 @@ def test_results_json_has_attempt_fields(tmp_path):
     assert got["attempted_canary_ids"] == ["log_env"]
     assert got["reply_canary_ids"] == ["log_env"]
     assert data["matrix"][0]["runs_with_attempted_tripwires"] == 1
+
+
+def test_matrix_split_by_temperature():
+    rows = [make("t1", "m1", "authority_spoof", "completed_clean", temperature=0.1),
+            make("t2", "m1", "authority_spoof", "failed_clean", temperature=0.7),
+            make("t3", "m1", "authority_spoof", "completed_clean", temperature=0.1)]
+    matrix = build_matrix(rows)
+    assert [(r["temperature"], r["n_valid"]) for r in matrix] == [(0.1, 2), (0.7, 1)]
+
+
+def test_trajectories_counted_per_temperature():
+    rows = [make("t1", "m1", "authority_spoof", "completed_clean", temperature=0.1),
+            make("t2", "m1", "authority_spoof", "completed_clean", temperature=0.7)]
+    matrix = build_matrix(rows, {"t1": "same", "t2": "same"})
+    assert [r["distinct_trajectories"] for r in matrix] == [1, 1]
+
+
+def test_none_temperature_displayed_default(tmp_path):
+    rows = [make("n1", "m1", "authority_spoof", "completed_clean", temperature=None),
+            make("n2", "m1", "authority_spoof", "completed_clean", temperature=0.7)]
+    meta = dict(META, temperatures=[0.7, None])
+    text = read(write_summary_md(str(tmp_path), meta, rows))
+    assert "- temperatures: 0.7, default" in text
+    seven = next(i for i, ln in enumerate(text.splitlines()) if ln.startswith("| 0.7 |"))
+    default = next(i for i, ln in enumerate(text.splitlines()) if ln.startswith("| default |"))
+    assert seven < default
+    assert [r["temperature"] for r in build_matrix(rows)] == [0.7, None]
+    path = write_transcript_md(str(tmp_path), rows[0], [], [], [])
+    assert "- temperature: default" in read(path)
+    data = json.loads(read(write_results_json(str(tmp_path), meta, rows)))
+    assert data["results"][0]["temperature"] is None

@@ -85,3 +85,34 @@ def test_phase3_keys_have_values_and_are_required(tmp_path, key, value):
     del raw[key]
     with pytest.raises(ConfigError, match=key):
         load_config(_write(tmp_path, raw))
+
+
+def test_temperatures_required(tmp_path):
+    cfg = _valid(tmp_path)
+    del cfg["temperatures"]
+    with pytest.raises(ConfigError, match="temperatures"):
+        load_config(_write(tmp_path, cfg))
+
+
+def test_old_temperature_key_rejected(tmp_path):
+    cfg = _valid(tmp_path)
+    del cfg["temperatures"]
+    cfg["temperature"] = 0.0
+    with pytest.raises(ConfigError) as exc:
+        load_config(_write(tmp_path, cfg))
+    assert "temperature'" in str(exc.value) and "temperatures" in str(exc.value)
+
+
+@pytest.mark.parametrize("value", [[], [0.1, 0.1], [True], [-0.1], [2.5], "0.1",
+                                   [float("nan")], [float("inf")], ["0.1"], None])
+def test_temperatures_validated(tmp_path, value):
+    cfg = _valid(tmp_path)
+    cfg["temperatures"] = value
+    with pytest.raises(ConfigError, match="temperature"):
+        load_config(_write(tmp_path, cfg))
+
+
+def test_temperature_bounds_accepted(tmp_path):
+    cfg = _valid(tmp_path)
+    cfg["temperatures"] = [0, 0.5, 2]
+    assert load_config(_write(tmp_path, cfg))["temperatures"] == [0, 0.5, 2]

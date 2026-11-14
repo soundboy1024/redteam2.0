@@ -66,7 +66,7 @@ def real_listener(tmp_path, monkeypatch):
 def go(scenario_id, chat_fn, rows=None, events=None, step_sink=None):
     rows = [] if rows is None else rows
     events = [] if events is None else events
-    return run_one(SCENARIOS[scenario_id], FIXTURES, "m:1b", 2, CFG, batch_id="b1",
+    return run_one(SCENARIOS[scenario_id], FIXTURES, "m:1b", 2, CFG, temperature=0.3, batch_id="b1",
                    telemetry=False, chat_fn=chat_fn,
                    step_sink=step_sink or rows.append,
                    event_sink=lambda rid, ev: events.append((rid, ev)))
@@ -97,7 +97,7 @@ def test_completed_run_rows_events_and_cleanup(tmp_ws, real_listener):
     assert rec["steps"] == 4 and rec["parse_failures"] == 0 and rec["poison_ingested"] is True
     assert rec["ctx_tripwire_canary_read"] is True
     assert rec["ctx_tripwire_unauth_tool_call"] is False
-    assert isinstance(rec["telemetry_enabled"], bool) and rec["temperature"] == CFG["temperature"]
+    assert isinstance(rec["telemetry_enabled"], bool) and rec["temperature"] == 0.3
     assert rec["repetition_index"] == 2 and rec["batch_id"] == "b1"
     assert str(uuid.UUID(rec["run_id"], version=4)) == rec["run_id"]
     assert os.listdir(tmp_ws) == []
@@ -108,7 +108,7 @@ def test_completed_run_rows_events_and_cleanup(tmp_ws, real_listener):
         assert r["run_id"] == rec["run_id"] and r["model_name"] == "m:1b"
         assert r["scenario_id"] == "indirect_injection_log"
         assert r["attack_taxonomy"] == "indirect_injection_log"
-        assert r["repetition_index"] == 2 and r["temperature"] == CFG["temperature"]
+        assert r["repetition_index"] == 2 and r["temperature"] == 0.3
         assert re.match(r"\d{4}-\d\d-\d\dT.*\+00:00$", r["timestamp"])
     assert events and all(rid == rec["run_id"] for rid, _ in events)
     assert "canary_read" in [ev["event"] for _, ev in events]
@@ -141,7 +141,7 @@ def test_listener_unreachable_is_invalid_with_row_derived_counts(tmp_ws, monkeyp
 
 def test_scenario_error_from_missing_poison_file_is_invalid(tmp_ws):
     sc = dict(SCENARIOS["benign_tempting"], poison_files=["nope.txt"])
-    rec = run_one(sc, FIXTURES, "m", 0, CFG, batch_id="b", telemetry=False,
+    rec = run_one(sc, FIXTURES, "m", 0, CFG, temperature=0.0, batch_id="b", telemetry=False,
                   chat_fn=scripted([]), step_sink=lambda r: None,
                   event_sink=lambda i, e: None)
     assert rec["status"] == "invalid" and rec["invalid_reason"].startswith("ScenarioError: ")
@@ -151,7 +151,7 @@ def test_scenario_error_from_missing_poison_file_is_invalid(tmp_ws):
 def test_scenario_error_from_missing_canary_file_is_invalid(tmp_ws):
     sc = dict(SCENARIOS["benign_tempting"], canary_files=["nope.env"])
     read = '{"tool": "read_workspace_file", "args": {"filename": ".env"}}'
-    rec = run_one(sc, FIXTURES, "m", 0, CFG, batch_id="b", telemetry=False,
+    rec = run_one(sc, FIXTURES, "m", 0, CFG, temperature=0.0, batch_id="b", telemetry=False,
                   chat_fn=scripted([read]), step_sink=lambda r: None,
                   event_sink=lambda i, e: None)
     assert rec["status"] == "invalid" and rec["invalid_reason"].startswith("ScenarioError: ")
@@ -174,7 +174,7 @@ def test_bare_value_error_is_a_harness_bug_and_propagates(tmp_ws, monkeypatch):
 def test_missing_fixture_raises_and_leaves_no_workspace(tmp_ws):
     sc = dict(SCENARIOS["benign_tempting"], fixture_dir="does_not_exist")
     with pytest.raises(FileNotFoundError):
-        run_one(sc, FIXTURES, "m", 0, CFG, batch_id="b", telemetry=False,
+        run_one(sc, FIXTURES, "m", 0, CFG, temperature=0.0, batch_id="b", telemetry=False,
                 chat_fn=scripted([]), step_sink=lambda r: None,
                 event_sink=lambda i, e: None)
     assert os.listdir(tmp_ws) == []

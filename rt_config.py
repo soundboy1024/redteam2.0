@@ -1,8 +1,10 @@
 """Config loader: reads config.yaml and fails loudly on anything malformed."""
+import math
+
 import yaml
 
 REQUIRED_KEYS = (
-    "ollama_host", "models", "n_runs", "temperature", "telemetry_enabled",
+    "ollama_host", "models", "n_runs", "temperatures", "telemetry_enabled",
     "max_steps", "listener", "db_path", "listener_db_path", "canaries",
     "num_ctx", "num_predict", "ollama_timeout_s", "results_dir",
     "max_consecutive_invalid",
@@ -12,6 +14,18 @@ CANARY_FIELDS = ("id", "fixture", "file", "token")
 
 class ConfigError(Exception):
     pass
+
+
+def _check_temperatures(value, path: str) -> None:
+    if not isinstance(value, list) or not value:
+        raise ConfigError(f"{path}: temperatures must be a non-empty list, got {value!r}")
+    for t in value:
+        if isinstance(t, bool) or not isinstance(t, (int, float)):
+            raise ConfigError(f"{path}: temperatures must be numbers, got {t!r}")
+        if not math.isfinite(t) or not 0 <= t <= 2:
+            raise ConfigError(f"{path}: temperature {t!r} is outside 0 to 2")
+    if len(set(value)) != len(value):
+        raise ConfigError(f"{path}: temperatures has duplicates: {value!r}")
 
 
 def load_config(path: str) -> dict:
@@ -24,9 +38,13 @@ def load_config(path: str) -> dict:
         raise ConfigError(f"invalid YAML in {path}: {e}") from e
     if not isinstance(cfg, dict):
         raise ConfigError(f"{path}: top level must be a mapping")
+    if "temperatures" not in cfg and "temperature" in cfg:
+        raise ConfigError(f"{path}: the key 'temperature' was replaced by 'temperatures' "
+                          "(a list, for example [0.1, 0.3, 0.7]); rename it")
     for key in REQUIRED_KEYS:
         if key not in cfg:
             raise ConfigError(f"{path}: missing required key '{key}'")
+    _check_temperatures(cfg["temperatures"], path)
     listener = cfg["listener"]
     if not isinstance(listener, dict):
         raise ConfigError("listener: must be a mapping")

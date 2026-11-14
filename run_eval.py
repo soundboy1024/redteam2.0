@@ -1,10 +1,11 @@
 """Batch CLI: wires harness, listener process, run log, grader and results writer.
 
 Usage: .venv/Scripts/python.exe run_eval.py [--config config.yaml] [--models a,b]
-       [--scenarios id,id] [--n-runs N] [--telemetry|--no-telemetry] [--batch-id ID]
+       [--scenarios id,id] [--n-runs N] [--temperatures 0.1,0.3] [--telemetry|--no-telemetry] [--batch-id ID]
 """
 import argparse
 import logging
+import math
 import os
 import sys
 from dataclasses import dataclass
@@ -44,8 +45,14 @@ class PreparedBatch:
     scenario_ids: list
     n_runs: int
     telemetry: bool
+    temperatures: list
     factory: Callable
     fixtures_root: str
+
+
+def temperatures_for(model: str, temperatures: list) -> list:
+    """The temperatures a model is run at. Every model takes them all for now."""
+    return list(temperatures)
 
 
 def _utc_stamp() -> str:
@@ -68,9 +75,9 @@ def _guard(fn: Callable) -> Callable:
 
 
 def _default_chat_fn_factory(cfg: dict, telemetry: bool) -> Callable:
-    def factory(model: str, repetition_index: int):
+    def factory(model: str, repetition_index: int, temperature: float | None):
         return partial(ollama_client.chat, cfg["ollama_host"], model,
-                       temperature=cfg["temperature"], seed=repetition_index,
+                       temperature=temperature, seed=repetition_index,
                        num_ctx=cfg["num_ctx"], num_predict=cfg["num_predict"],
                        telemetry=telemetry, timeout_s=cfg["ollama_timeout_s"])
     return factory
@@ -92,7 +99,8 @@ def _remove_empty_batch(batch_log) -> None:
 
 def prepare_batch(cfg: dict, models: list[str], scenario_ids: list[str], n_runs: int,
                   telemetry: bool, batch_id: str, chat_fn_factory: Callable | None = None,
-                  *, config_path: str, scenarios_path: str = SCENARIOS_PATH,
+                  *, temperatures: list, config_path: str,
+                  scenarios_path: str = SCENARIOS_PATH,
                   fixtures_root: str = FIXTURES_ROOT) -> PreparedBatch:
     """Config check and batch opening: everything that may fail before a run starts."""
     file_cfg = load_config(config_path)
@@ -107,7 +115,8 @@ def prepare_batch(cfg: dict, models: list[str], scenario_ids: list[str], n_runs:
     # Before anything is launched, so a bad or reused batch id fails first.
     batch_log = open_batch(cfg["db_path"], cfg["results_dir"], batch_id)
     return PreparedBatch(cfg, config_path, batch_log, scenarios, chosen, list(models),
-                         list(scenario_ids), n_runs, telemetry, factory, fixtures_root)
+                         list(scenario_ids), n_runs, telemetry, list(temperatures), factory,
+                         fixtures_root)
 
 
 def _run_all(prep: PreparedBatch, state: dict) -> None:
@@ -135,20 +144,22 @@ def _run_all(prep: PreparedBatch, state: dict) -> None:
     consecutive = 0
     for model in prep.models:
         for scenario in prep.chosen:
-            for rep in range(prep.n_runs):
-                current["scenario"] = scenario
-                rec = run_one(scenario, prep.fixtures_root, model, rep, cfg,
-                              batch_id=batch_log.batch_id, telemetry=prep.telemetry,
-                              chat_fn=prep.factory(model, rep),
-                              step_sink=step_sink, event_sink=event_sink)
-                record_run(rec)
-                state["recorded"] += 1
-                consecutive = consecutive + 1 if rec["status"] == "invalid" else 0
-                if consecutive >= cfg["max_consecutive_invalid"]:
-                    log.error("aborting batch %s: %d consecutive invalid runs",
-                              batch_log.batch_id, consecutive)
-                    state["aborted"], state["abort_reason"] = True, CONSECUTIVE_INVALID
-                    return
+            for temperature in temperatures_for(model, prep.temperatures):
+                for rep in range(prep.n_runs):
+                    current["scenario"] = scenario
+                    rec = run_one(scenario, prep.fixtures_root, model, rep, cfg,
+                                  temperature=temperature,
+                                  batch_id=batch_log.batch_id, telemetry=prep.telemetry,
+                                  chat_fn=prep.factory(model, rep, temperature),
+                                  step_sink=step_sink, event_sink=event_sink)
+                    record_run(rec)
+                    state["recorded"] += 1
+                    consecutive = consecutive + 1 if rec["status"] == "invalid" else 0
+                    if consecutive >= cfg["max_consecutive_invalid"]:
+                        log.error("aborting batch %s: %d consecutive invalid runs",
+                                  batch_log.batch_id, consecutive)
+                        state["aborted"], state["abort_reason"] = True, CONSECUTIVE_INVALID
+                        return
 
 
 def _stop(proc, error: BaseException | None) -> Exception | None:
@@ -185,7 +196,7 @@ def execute_batch(prep: PreparedBatch) -> dict:
     stop_error = _stop(proc, error)
     meta = {"batch_id": batch_log.batch_id, "models": prep.models,
             "scenario_ids": prep.scenario_ids, "n_runs": prep.n_runs,
-            "temperature": cfg["temperature"], "telemetry_enabled": prep.telemetry,
+            "temperatures": prep.temperatures, "telemetry_enabled": prep.telemetry,
             "started_at": started_at, "ended_at": _now(), "aborted": state["aborted"],
             "abort_reason": state["abort_reason"]}
     if error is None:
@@ -207,16 +218,36 @@ def execute_batch(prep: PreparedBatch) -> dict:
 
 def run_batch(cfg: dict, models: list[str], scenario_ids: list[str], n_runs: int,
               telemetry: bool, batch_id: str, chat_fn_factory: Callable | None = None,
-              *, config_path: str, scenarios_path: str = SCENARIOS_PATH,
+              *, temperatures: list, config_path: str,
+              scenarios_path: str = SCENARIOS_PATH,
               fixtures_root: str = FIXTURES_ROOT) -> dict:
     return execute_batch(prepare_batch(
         cfg, models, scenario_ids, n_runs, telemetry, batch_id, chat_fn_factory,
-        config_path=config_path, scenarios_path=scenarios_path,
-        fixtures_root=fixtures_root))
+        temperatures=temperatures, config_path=config_path,
+        scenarios_path=scenarios_path, fixtures_root=fixtures_root))
 
 
 def _csv(text: str) -> list[str]:
     return [p.strip() for p in text.split(",") if p.strip()]
+
+
+def _parse_temperatures(text: str) -> list[float]:
+    """'0.1,0.3' to [0.1, 0.3]. Raises ValueError with a clear message."""
+    parts = _csv(text)
+    if not parts:
+        raise ValueError("--temperatures is empty; give numbers like 0.1,0.3 or omit the flag")
+    values = []
+    for p in parts:
+        try:
+            v = float(p)
+        except ValueError:
+            raise ValueError(f"--temperatures: {p!r} is not a number") from None
+        if not math.isfinite(v) or not 0 <= v <= 2:
+            raise ValueError(f"--temperatures: {p!r} is outside 0 to 2")
+        values.append(v)
+    if len(set(values)) != len(values):
+        raise ValueError(f"--temperatures has duplicates: {text!r}")
+    return values
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -225,6 +256,7 @@ def _parser() -> argparse.ArgumentParser:
     p.add_argument("--models", help="comma list; default from config")
     p.add_argument("--scenarios", help="comma list of scenario ids; default all")
     p.add_argument("--n-runs", type=int)
+    p.add_argument("--temperatures", help="comma list, each 0 to 2; default from config")
     p.add_argument("--telemetry", dest="telemetry", action="store_true", default=None)
     p.add_argument("--no-telemetry", dest="telemetry", action="store_false")
     p.add_argument("--batch-id", default=None)
@@ -265,11 +297,16 @@ def main(argv: list[str] | None = None) -> int:
     n_runs = args.n_runs if args.n_runs is not None else cfg["n_runs"]
     if n_runs < 1:
         return _fail("--n-runs must be at least 1")
+    try:
+        temperatures = (list(cfg["temperatures"]) if args.temperatures is None
+                        else _parse_temperatures(args.temperatures))
+    except ValueError as exc:
+        return _fail(str(exc))
     telemetry = cfg["telemetry_enabled"] if args.telemetry is None else args.telemetry
     batch_id = args.batch_id or _utc_stamp()
     try:
         prep = prepare_batch(cfg, models, scenario_ids, n_runs, telemetry, batch_id,
-                             config_path=args.config)
+                             temperatures=temperatures, config_path=args.config)
     except ValueError as exc:
         return _fail(str(exc))
     try:

@@ -235,11 +235,11 @@ def _batches(ev: Evidence, cfg: dict, config_path: str, model: str) -> list[str]
     ev.data["batches"] = {}
     out(ev, f"batch A {ids['A']}: benign_control, indirect_injection_log, 1 rep, telemetry off")
     a = run_eval.run_batch(cfg, [model], list(A_SCENARIOS), 1, False, ids["A"],
-                           config_path=config_path)
+                           temperatures=[0.0], config_path=config_path)
     ev.data["batches"]["A"] = _batch_data(a, ids["A"])  # survives a batch B failure
     out(ev, f"batch B {ids['B']}: indirect_injection_log, 1 rep, telemetry on")
     b = run_eval.run_batch(cfg, [model], list(B_SCENARIOS), 1, True, ids["B"],
-                           config_path=config_path)
+                           temperatures=[0.0], config_path=config_path)
     ev.data["batches"]["B"] = _batch_data(b, ids["B"])
     ev.data["results"] = a["results"] + b["results"]
     return _report(ev, cfg, a, b, ids)

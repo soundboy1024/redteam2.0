@@ -49,7 +49,7 @@ def factory_for(replies_by_scenario=None, default=None):
     the factory, so scripts are consumed in run order from a shared list of scripts."""
     scripts = list(replies_by_scenario or [])
 
-    def factory(model, rep):
+    def factory(model, rep, temperature):
         return Script(scripts.pop(0) if scripts else default)
     return factory
 
@@ -79,10 +79,11 @@ def env(tmp_path, monkeypatch):
         yield cfg, str(cfg_path), calls
 
 
-def batch(env, scenarios, factory, n_runs=1, batch_id="b1"):
+def batch(env, scenarios, factory, n_runs=1, batch_id="b1", temperatures=(0.0,)):
     cfg, cfg_path, _ = env
     return run_eval.run_batch(cfg, ["m:1b"], scenarios, n_runs, False, batch_id,
-                              factory, config_path=cfg_path)
+                              factory, temperatures=list(temperatures),
+                              config_path=cfg_path)
 
 
 def test_two_scenarios_graded_and_files_written(env):
@@ -174,7 +175,7 @@ def test_default_factory_binds_chat_with_seed_and_config(env, monkeypatch):
     out = batch(env, ["benign_tempting"], None, n_runs=2)
     assert len(out["results"]) == 2
     assert seen["seed"] == 1 and seen["host"] == cfg["ollama_host"] and seen["model"] == "m:1b"
-    assert seen["temperature"] == cfg["temperature"] and seen["telemetry"] is False
+    assert seen["temperature"] == 0.0 and seen["telemetry"] is False
     assert seen["num_ctx"] == cfg["num_ctx"] and seen["timeout_s"] == cfg["ollama_timeout_s"]
 
 
@@ -198,7 +199,7 @@ def test_main_runs_batch_prints_lines_exit_0(env, monkeypatch, capsys):
                         lambda cfg, tele: factory_for([[LIST, READ_LOG, FINAL]]))
     rc = run_eval.main(["--config", cfg_path, "--models", "typo:1b", "--allow-any-model",
                         "--scenarios", "benign_tempting", "--n-runs", "1",
-                        "--batch-id", "cli1"])
+                        "--temperatures", "0.0", "--batch-id", "cli1"])
     out = capsys.readouterr().out
     assert rc == 0 and calls["stop"] == ["proc"]
     assert "benign_tempting typo:1b rep=0 completed_clean" in out
@@ -210,7 +211,8 @@ def test_main_aborted_batch_exits_1(env, monkeypatch, capsys):
     monkeypatch.setattr(run_eval, "_default_chat_fn_factory",
                         lambda cfg, tele: factory_for(default=[OllamaError("down")]))
     rc = run_eval.main(["--config", cfg_path, "--models", "m", "--allow-any-model",
-                        "--scenarios", "benign_tempting", "--n-runs", "4", "--batch-id", "ab1"])
+                        "--scenarios", "benign_tempting", "--n-runs", "4", "--temperatures", "0.0",
+                        "--batch-id", "ab1"])
     captured = capsys.readouterr()
     assert rc == 1 and "aborted" in captured.err
     assert captured.out.count("invalid") == 3
@@ -287,7 +289,8 @@ def test_run_batch_rejects_cfg_that_disagrees_with_config_file(env, key, value):
     cfg, cfg_path, calls = env
     with pytest.raises(ValueError, match=key):
         run_eval.run_batch(dict(cfg, **{key: value}), ["m"], ["benign_tempting"], 1, False,
-                           "dis1", factory_for([[FINAL]]), config_path=cfg_path)
+                           "dis1", factory_for([[FINAL]]),
+                           temperatures=[0.0], config_path=cfg_path)
     assert calls["start"] == []
     assert not os.path.exists(os.path.join(cfg["results_dir"], "dis1"))
 
@@ -304,11 +307,11 @@ def test_telemetry_batch_round_trips_real_shaped_logprobs(env):
             r.logprobs = [lp("{", 0), lp("final", -0.25), lp("}", -0.5)]
             return r
 
-    def factory(model, rep):
+    def factory(model, rep, temperature):
         return TeleScript([LIST, READ_LOG, FINAL])
     cfg, _, _ = env
     out = run_eval.run_batch(cfg, ["m:1b"], ["benign_tempting"], 1, True, "tele1", factory,
-                             config_path=env[1])
+                             temperatures=[0.0], config_path=env[1])
     (r,) = out["results"]
     assert r["valid"] and r["telemetry_enabled"] is True
     from telemetry.logger import read_steps
@@ -355,7 +358,8 @@ def test_run_that_fails_before_step_zero_still_has_inputs(env):
     bad_path = pathlib.Path(cfg["results_dir"]).parent / "scen.json"
     bad_path.write_text(json.dumps(bad), encoding="utf-8")
     out = run_eval.run_batch(cfg, ["m:1b"], ["indirect_injection_log"], 1, False, "sc1",
-                             factory_for([[FINAL]]), config_path=cfg_path,
+                             factory_for([[FINAL]]), temperatures=[0.0],
+                             config_path=cfg_path,
                              scenarios_path=str(bad_path))
     (r,) = out["results"]
     assert r["valid"] is False and "ScenarioError" in r["invalid_reason"]
@@ -483,7 +487,8 @@ def test_main_late_failure_prints_batch_and_folder_and_logs_traceback(env, monke
                         lambda cfg, tele: factory_for(default=[ValueError("late bug")]))
     with caplog.at_level(logging.ERROR, logger="run_eval"):
         rc = run_eval.main(["--config", cfg_path, "--scenarios", "benign_tempting",
-                            "--n-runs", "1", "--batch-id", "late1"])
+                            "--n-runs", "1", "--temperatures", "0.0",
+                            "--batch-id", "late1"])
     err = capsys.readouterr().err
     assert rc == 1 and "late1" in err and "late bug" in err
     assert os.path.join(cfg["results_dir"], "late1") in err
@@ -532,3 +537,60 @@ def test_canary_only_in_query_string_of_allowed_webhook_is_exfiltrated(env):
     assert r["tripwire_canary_exfiltrated"] is True and r["canary_ids"] == ["md_env"]
     assert r["tripwire_unauth_tool_call"] is False and r["tripwire_canary_read"] is False
     assert r["tripwire_honeypot_endpoint_hit"] is False and r["compromised"] is True
+
+
+def test_batch_runs_every_temperature(env):
+    seen = []
+
+    def factory(model, rep, temperature):
+        seen.append((model, rep, temperature))
+        return Script([FINAL])
+    out = batch(env, ["benign_tempting"], factory, n_runs=2, temperatures=[0.1, 0.7])
+    assert [(r["temperature"], r["repetition_index"]) for r in out["results"]] == [
+        (0.1, 0), (0.1, 1), (0.7, 0), (0.7, 1)]
+    assert seen == [("m:1b", 0, 0.1), ("m:1b", 1, 0.1), ("m:1b", 0, 0.7), ("m:1b", 1, 0.7)]
+
+
+def test_run_order_is_model_scenario_temperature_repetition(env):
+    cfg, cfg_path, _ = env
+    seen = []
+
+    def factory(model, rep, temperature):
+        seen.append((model, rep, temperature))
+        return Script([FINAL])
+    run_eval.run_batch(cfg, ["m:1b", "m:2b"], ["benign_tempting", "benign_control"], 1,
+                       False, "ord1", factory, temperatures=[0.7, 0.1], config_path=cfg_path)
+    assert [(m, t) for m, _, t in seen] == [
+        ("m:1b", 0.7), ("m:1b", 0.1), ("m:1b", 0.7), ("m:1b", 0.1),
+        ("m:2b", 0.7), ("m:2b", 0.1), ("m:2b", 0.7), ("m:2b", 0.1)]
+
+
+def test_temperatures_for_returns_a_copy():
+    temps = [0.1, 0.3]
+    out = run_eval.temperatures_for("m", temps)
+    assert out == temps and out is not temps
+
+
+def test_batch_meta_carries_temperatures(env):
+    out = batch(env, ["benign_tempting"], factory_for([[FINAL]]), temperatures=[0.2])
+    meta = json.loads((pathlib.Path(out["out_dir"]) / "results.json").read_text("utf-8"))["batch"]
+    assert meta["temperatures"] == [0.2] and "temperature" not in meta
+
+
+def test_none_temperature_round_trips_through_run_log(env):
+    out = batch(env, ["benign_tempting"], factory_for([[FINAL]]), temperatures=[None])
+    (r,) = out["results"]
+    assert r["temperature"] is None
+    from telemetry.logger import read_steps
+    cfg = env[0]
+    assert all(s["temperature"] is None for s in read_steps(cfg["db_path"], r["run_id"]))
+    text = (pathlib.Path(out["out_dir"]) / "summary.md").read_text("utf-8")
+    assert "| default |" in text
+
+
+@pytest.mark.parametrize("value", ["", ",", "abc", "0.1,x", "-1", "3", "nan", "0.1,0.1"])
+def test_cli_temperatures_flag_invalid(env, capsys, value):
+    _, cfg_path, calls = env
+    assert run_eval.main(["--config", cfg_path, "--scenarios", "benign_tempting",
+                          "--temperatures", value]) == 1
+    assert "--temperatures" in capsys.readouterr().err and calls["start"] == []
