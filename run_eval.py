@@ -7,38 +7,53 @@ import argparse
 import logging
 import os
 import sys
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from functools import partial
 from typing import Callable
 
+from batch_results import LogWriteError, write_batch_results
 from harness import ollama_client
+from harness.agent_loop import SYSTEM_PROMPT
 from harness.runner import load_scenarios, run_one
 from listener_proc import start_listener, stop_listener
 from rt_config import ConfigError, load_config
-from telemetry.grader import grade_batch
-from telemetry.logger import (JSONL_FILES, log_run, log_step, log_tool_event,
-                              open_batch, read_steps, read_tool_events)
-from telemetry.report import (write_results_json, write_summary_md,
-                              write_transcript_md)
-from traps.events_db import fetch_events
+from telemetry.logger import (JSONL_FILES, log_run, log_run_inputs, log_step,
+                              log_tool_event, open_batch)
 from traps.validate_scenarios import validate
 
 log = logging.getLogger(__name__)
 ROOT = os.path.dirname(os.path.abspath(__file__))
 SCENARIOS_PATH = os.path.join(ROOT, "traps", "scenarios.json")
 FIXTURES_ROOT = os.path.join(ROOT, "traps", "fixtures")
-
-
-class LogWriteError(RuntimeError):
-    """The run log could not be written. Not caught by run_one: the batch aborts."""
+CONSECUTIVE_INVALID = "consecutive invalid runs"
 
 
 class ListenerStartError(RuntimeError):
     """The decoy listener could not be started (for example the port is in use)."""
 
 
+@dataclass
+class PreparedBatch:
+    cfg: dict
+    config_path: str
+    batch_log: object       # telemetry.logger.BatchLog
+    scenarios: list         # every scenario, for the grader
+    chosen: list            # the scenarios this batch runs
+    models: list
+    scenario_ids: list
+    n_runs: int
+    telemetry: bool
+    factory: Callable
+    fixtures_root: str
+
+
 def _utc_stamp() -> str:
     return datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+
+
+def _now() -> str:
+    return datetime.now(timezone.utc).isoformat()
 
 
 def _guard(fn: Callable) -> Callable:
@@ -61,19 +76,6 @@ def _default_chat_fn_factory(cfg: dict, telemetry: bool) -> Callable:
     return factory
 
 
-def _write_results(cfg, batch_log, batch_id, scenarios, meta):
-    results = grade_batch(cfg["db_path"], cfg["listener_db_path"], batch_id,
-                          scenarios, cfg["canaries"])
-    write_results_json(batch_log.out_dir, meta, results)
-    write_summary_md(batch_log.out_dir, meta, results)
-    for r in results:
-        write_transcript_md(
-            batch_log.out_dir, r, read_steps(cfg["db_path"], r["run_id"]),
-            read_tool_events(cfg["db_path"], r["run_id"]),
-            fetch_events(cfg["listener_db_path"], r["run_id"]))
-    return results
-
-
 def _remove_empty_batch(batch_log) -> None:
     """Undo open_batch after a failed listener start, if nothing was written."""
     try:
@@ -88,10 +90,11 @@ def _remove_empty_batch(batch_log) -> None:
         log.error("could not remove empty batch folder %s", batch_log.out_dir, exc_info=True)
 
 
-def run_batch(cfg: dict, models: list[str], scenario_ids: list[str], n_runs: int,
-              telemetry: bool, batch_id: str, chat_fn_factory: Callable | None = None,
-              *, config_path: str, scenarios_path: str = SCENARIOS_PATH,
-              fixtures_root: str = FIXTURES_ROOT) -> dict:
+def prepare_batch(cfg: dict, models: list[str], scenario_ids: list[str], n_runs: int,
+                  telemetry: bool, batch_id: str, chat_fn_factory: Callable | None = None,
+                  *, config_path: str, scenarios_path: str = SCENARIOS_PATH,
+                  fixtures_root: str = FIXTURES_ROOT) -> PreparedBatch:
+    """Config check and batch opening: everything that may fail before a run starts."""
     file_cfg = load_config(config_path)
     for key in ("canaries", "listener"):
         if file_cfg[key] != cfg[key]:
@@ -103,47 +106,113 @@ def run_batch(cfg: dict, models: list[str], scenario_ids: list[str], n_runs: int
     factory = chat_fn_factory or _default_chat_fn_factory(cfg, telemetry)
     # Before anything is launched, so a bad or reused batch id fails first.
     batch_log = open_batch(cfg["db_path"], cfg["results_dir"], batch_id)
-    step_sink = _guard(lambda row: log_step(batch_log, row))
+    return PreparedBatch(cfg, config_path, batch_log, scenarios, chosen, list(models),
+                         list(scenario_ids), n_runs, telemetry, factory, fixtures_root)
+
+
+def _run_all(prep: PreparedBatch, state: dict) -> None:
+    """Every run of the batch, in order. Updates state as runs are recorded."""
+    cfg, batch_log = prep.cfg, prep.batch_log
+    current: dict = {}
+    inputs_logged: set[str] = set()
+
+    def log_inputs(run_id: str) -> None:  # once per run, before its first row
+        if run_id not in inputs_logged:
+            sc = current["scenario"]
+            log_run_inputs(batch_log, run_id, sc["user_prompt"], SYSTEM_PROMPT, sc)
+            inputs_logged.add(run_id)
+
+    def step(row: dict) -> None:
+        log_inputs(row["run_id"])
+        log_step(batch_log, row)
+
+    def record(rec: dict) -> None:
+        log_inputs(rec["run_id"])  # a run that failed before step 0 has no rows
+        log_run(batch_log, rec)
+
+    step_sink, record_run = _guard(step), _guard(record)
     event_sink = _guard(lambda run_id, ev: log_tool_event(batch_log, run_id, ev))
-    record_run = _guard(lambda rec: log_run(batch_log, rec))
-    started_at = datetime.now(timezone.utc).isoformat()
-    aborted, consecutive = False, 0
+    consecutive = 0
+    for model in prep.models:
+        for scenario in prep.chosen:
+            for rep in range(prep.n_runs):
+                current["scenario"] = scenario
+                rec = run_one(scenario, prep.fixtures_root, model, rep, cfg,
+                              batch_id=batch_log.batch_id, telemetry=prep.telemetry,
+                              chat_fn=prep.factory(model, rep),
+                              step_sink=step_sink, event_sink=event_sink)
+                record_run(rec)
+                state["recorded"] += 1
+                consecutive = consecutive + 1 if rec["status"] == "invalid" else 0
+                if consecutive >= cfg["max_consecutive_invalid"]:
+                    log.error("aborting batch %s: %d consecutive invalid runs",
+                              batch_log.batch_id, consecutive)
+                    state["aborted"], state["abort_reason"] = True, CONSECUTIVE_INVALID
+                    return
+
+
+def _stop(proc, error: BaseException | None) -> Exception | None:
+    """Stop the listener. A failure is logged and returned, never raised here, so it
+    cannot mask an exception already in flight."""
+    try:
+        stop_listener(proc)
+    except Exception as exc:
+        log.exception("could not stop the listener")
+        if error is not None:
+            log.error("the batch was already failing with %s: %s", type(error).__name__, error)
+        return exc
+    return None
+
+
+def execute_batch(prep: PreparedBatch) -> dict:
+    cfg, batch_log = prep.cfg, prep.batch_log
     host, port = cfg["listener"]["host"], cfg["listener"]["port"]
     try:
-        proc = start_listener(os.path.abspath(config_path),
+        proc = start_listener(os.path.abspath(prep.config_path),
                               os.path.abspath(cfg["listener_db_path"]), host, port)
     except RuntimeError as exc:
         _remove_empty_batch(batch_log)
         raise ListenerStartError(str(exc)) from exc
+    started_at = _now()
+    state = {"recorded": 0, "aborted": False, "abort_reason": None}
+    error = None
     try:
-        for model in models:
-            for scenario in chosen:
-                for rep in range(n_runs):
-                    record = run_one(scenario, fixtures_root, model, rep, cfg,
-                                     batch_id=batch_id, telemetry=telemetry,
-                                     chat_fn=factory(model, rep),
-                                     step_sink=step_sink, event_sink=event_sink)
-                    record_run(record)
-                    consecutive = consecutive + 1 if record["status"] == "invalid" else 0
-                    if consecutive >= cfg["max_consecutive_invalid"]:
-                        aborted = True
-                        log.error("aborting batch %s: %d consecutive invalid runs",
-                                  batch_id, consecutive)
-                        break
-                if aborted:
-                    break
-            if aborted:
-                break
-    finally:
-        stop_listener(proc)
-    meta = {"batch_id": batch_id, "models": list(models),
-            "scenario_ids": list(scenario_ids), "n_runs": n_runs,
-            "temperature": cfg["temperature"], "telemetry_enabled": telemetry,
-            "started_at": started_at, "ended_at": datetime.now(timezone.utc).isoformat(),
-            "aborted": aborted}
-    results = _write_results(cfg, batch_log, batch_id, scenarios, meta)
-    return {"batch_id": batch_id, "out_dir": batch_log.out_dir, "results": results,
-            "aborted": aborted}
+        _run_all(prep, state)
+    except BaseException as exc:  # held, results written below, then re-raised
+        error = exc
+        state["aborted"], state["abort_reason"] = True, f"{type(exc).__name__}: {exc}"
+        log.error("batch %s aborted: %s", batch_log.batch_id, state["abort_reason"])
+    stop_error = _stop(proc, error)
+    meta = {"batch_id": batch_log.batch_id, "models": prep.models,
+            "scenario_ids": prep.scenario_ids, "n_runs": prep.n_runs,
+            "temperature": cfg["temperature"], "telemetry_enabled": prep.telemetry,
+            "started_at": started_at, "ended_at": _now(), "aborted": state["aborted"],
+            "abort_reason": state["abort_reason"]}
+    if error is None:
+        results = write_batch_results(cfg, batch_log, prep.scenarios, meta)
+        if stop_error is not None:
+            raise stop_error
+        return {"batch_id": batch_log.batch_id, "out_dir": batch_log.out_dir,
+                "results": results, "aborted": state["aborted"],
+                "abort_reason": state["abort_reason"]}
+    if state["recorded"]:
+        try:
+            write_batch_results(cfg, batch_log, prep.scenarios, meta)
+        except Exception:
+            log.exception("batch %s: grading or writing results failed after the abort "
+                          "(%s); the original error is re-raised", batch_log.batch_id,
+                          state["abort_reason"])
+    raise error
+
+
+def run_batch(cfg: dict, models: list[str], scenario_ids: list[str], n_runs: int,
+              telemetry: bool, batch_id: str, chat_fn_factory: Callable | None = None,
+              *, config_path: str, scenarios_path: str = SCENARIOS_PATH,
+              fixtures_root: str = FIXTURES_ROOT) -> dict:
+    return execute_batch(prepare_batch(
+        cfg, models, scenario_ids, n_runs, telemetry, batch_id, chat_fn_factory,
+        config_path=config_path, scenarios_path=scenarios_path,
+        fixtures_root=fixtures_root))
 
 
 def _csv(text: str) -> list[str]:
@@ -199,15 +268,23 @@ def main(argv: list[str] | None = None) -> int:
     telemetry = cfg["telemetry_enabled"] if args.telemetry is None else args.telemetry
     batch_id = args.batch_id or _utc_stamp()
     try:
-        out = run_batch(cfg, models, scenario_ids, n_runs, telemetry, batch_id,
-                        config_path=args.config)
-    except (ListenerStartError, LogWriteError, ValueError) as exc:
+        prep = prepare_batch(cfg, models, scenario_ids, n_runs, telemetry, batch_id,
+                             config_path=args.config)
+    except ValueError as exc:
         return _fail(str(exc))
+    try:
+        out = execute_batch(prep)
+    except ListenerStartError as exc:
+        return _fail(str(exc))
+    except Exception as exc:  # a late failure: reported with its traceback, exit 1
+        log.exception("batch %s failed", batch_id)
+        return _fail(f"batch {batch_id} failed ({type(exc).__name__}: {exc}); "
+                     f"output folder: {prep.batch_log.out_dir}")
     print(f"summary: {os.path.join(out['out_dir'], 'summary.md')}")
     for r in out["results"]:
         print(f"{r['scenario_id']} {r['model_name']} rep={r['repetition_index']} {r['cell']}")
     if out["aborted"]:
-        return _fail(f"batch {batch_id} aborted after consecutive invalid runs")
+        return _fail(f"batch {batch_id} aborted: {out['abort_reason']}")
     return 0
 
 

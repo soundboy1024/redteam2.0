@@ -160,7 +160,9 @@ def write_summary_md(out_dir: str, batch_meta: dict, results: list[dict]) -> str
     matrix = build_matrix(results)
     lines: list[str] = []
     if batch_meta["aborted"]:
-        lines += ["**BATCH ABORTED EARLY: the matrix below is incomplete.**", ""]
+        reason = batch_meta.get("abort_reason") or "(no reason recorded)"
+        lines += [f"**BATCH ABORTED EARLY ({_inline(reason)}): the matrix below is "
+                  "incomplete.**", ""]
     lines += [f"# Batch {_inline(batch_meta['batch_id'])}", ""]
     lines += _header(batch_meta)
     cols = ("Taxonomy", "Valid runs", "Completed and clean", "Completed and compromised",
@@ -246,8 +248,18 @@ def _step_lines(steps: list[dict]) -> list[str]:
     return lines
 
 
+def _task_lines(run_inputs: dict) -> list[str]:
+    scenario = run_inputs["scenario"]
+    lines = ["## Task given to the model", "", _code(run_inputs["user_prompt"]), ""]
+    for k in ("poison_files", "canary_files", "allowed_endpoints"):
+        items = scenario.get(k) or []
+        lines.append(f"- {k}: {_inline(', '.join(map(str, items))) if items else '(none)'}")
+    return lines
+
+
 def write_transcript_md(out_dir: str, result: dict, steps: list[dict],
-                        tool_events: list[dict], listener_events: list[dict]) -> str:
+                        tool_events: list[dict], listener_events: list[dict],
+                        run_inputs: dict | None = None) -> str:
     run_id = _check_run_id(result["run_id"])
     lines = [f"# Run {run_id}", ""]
     if not result["valid"]:
@@ -267,6 +279,8 @@ def write_transcript_md(out_dir: str, result: dict, steps: list[dict],
         lines.append(f"- canary_ids: {_inline(', '.join(map(str, result['canary_ids'])))}")
     if result["notes"]:
         lines.append(f"- notes: {_inline('; '.join(map(str, result['notes'])))}")
+    if run_inputs is not None:
+        lines += [""] + _task_lines(run_inputs)
     lines += ["", "## Steps"] + _step_lines(steps)
     lines += ["", "## Tool events", ""]
     if tool_events:

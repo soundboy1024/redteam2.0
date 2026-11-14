@@ -13,8 +13,9 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 
 from telemetry.schema import (AGENT_STATES, BOOL_COLUMNS, DDL, INTEGER_COLUMNS,
-                              REAL_COLUMNS, RUN_COLUMNS, RUN_STATUSES,
-                              SCHEMA_VERSION, STEP_COLUMNS)
+                              REAL_COLUMNS, RESULT_COLUMNS, RUN_COLUMNS,
+                              RUN_INPUT_COLUMNS, RUN_STATUSES, SCHEMA_VERSION,
+                              STEP_COLUMNS)
 
 INT64_MIN, INT64_MAX = -(2 ** 63), 2 ** 63 - 1
 MAX_DETAIL_DEPTH = 50
@@ -239,6 +240,46 @@ def log_run(log: BatchLog, run: dict) -> None:
         raise ValueError(f"run {run['run_id']!r} already logged: {exc}") from exc
 
 
+def _insert_once(db_path: str, table: str, columns: tuple, norm: dict, what: str) -> None:
+    try:
+        _insert(db_path, table, columns, _db_values(norm, columns))
+    except sqlite3.IntegrityError as exc:
+        raise ValueError(f"{what} for run {norm['run_id']!r} already logged: {exc}") from exc
+
+
+def log_result(log: BatchLog, result: dict) -> None:
+    """Store one graded result row: the whole row as JSON plus query columns."""
+    if not isinstance(result, dict):
+        raise ValueError(f"result must be a dict, got {type(result).__name__}")
+    plain = [c for c in RESULT_COLUMNS if c != "result_json"]
+    missing = [c for c in plain if c not in result]
+    if missing:
+        raise KeyError(f"result row keys wrong: missing {missing}")
+    _check_run_id(result)
+    if result["batch_id"] != log.batch_id:
+        raise ValueError(f"result batch_id {result['batch_id']!r} != batch {log.batch_id!r}")
+    json.dumps(result, allow_nan=False, default=repr)  # ValueError on a non-finite number
+    result_json = _dumps(_sanitize_detail(result))
+    norm = _normalize({**{c: result[c] for c in plain}, "result_json": result_json},
+                      RESULT_COLUMNS)
+    _insert_once(log.db_path, "results", RESULT_COLUMNS, norm, "result")
+
+
+def log_run_inputs(log: BatchLog, run_id: str, user_prompt: str, system_prompt: str,
+                   scenario: dict) -> None:
+    """Store what a run was given: the prompts and the scenario entry as loaded."""
+    if not isinstance(scenario, dict):
+        raise ValueError(f"scenario must be a dict, got {type(scenario).__name__}")
+    row = {"run_id": run_id, "user_prompt": user_prompt, "system_prompt": system_prompt,
+           "scenario_json": _dumps(scenario)}  # ValueError on a non-finite number
+    _check_run_id(row)
+    for col in ("user_prompt", "system_prompt"):
+        if not isinstance(row[col], str):
+            raise ValueError(f"{col} must be a str, got {type(row[col]).__name__}")
+    norm = _normalize(row, RUN_INPUT_COLUMNS)
+    _insert_once(log.db_path, "run_inputs", RUN_INPUT_COLUMNS, norm, "run inputs")
+
+
 def _fetch(db_path: str, sql: str, params: tuple) -> list[sqlite3.Row]:
     with closing(sqlite3.connect(db_path)) as conn:
         conn.row_factory = sqlite3.Row
@@ -267,3 +308,18 @@ def read_tool_events(db_path: str, run_id: str) -> list[dict]:
                   (run_id,))
     return [{"event": r["event"], "timestamp": r["timestamp"],
              **json.loads(r["detail_json"])} for r in rows]
+
+
+def read_results(db_path: str, batch_id: str) -> list[dict]:
+    rows = _fetch(db_path, "SELECT * FROM results WHERE batch_id = ? ORDER BY rowid",
+                  (batch_id,))
+    return [_decode(r, RESULT_COLUMNS) for r in rows]
+
+
+def read_run_inputs(db_path: str, run_id: str) -> dict | None:
+    rows = _fetch(db_path, "SELECT * FROM run_inputs WHERE run_id = ?", (run_id,))
+    if not rows:
+        return None
+    r = rows[0]
+    return {"run_id": r["run_id"], "user_prompt": r["user_prompt"],
+            "system_prompt": r["system_prompt"], "scenario": json.loads(r["scenario_json"])}

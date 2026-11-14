@@ -1,14 +1,21 @@
 import json
+import logging
 import os
 import pathlib
+import sqlite3
 import urllib.parse
+from contextlib import closing
 
 import pytest
 import yaml
 from fastapi.testclient import TestClient
 
+import batch_results
 import run_eval
 from harness import tools
+from harness.agent_loop import SYSTEM_PROMPT
+from harness.runner import load_scenarios
+from telemetry.logger import read_results, read_run_inputs
 from harness.ollama_client import ChatResult, OllamaError
 from rt_config import load_config
 from traps.honeypot_server import create_app
@@ -31,7 +38,7 @@ class Script:
 
     def __call__(self, messages):
         item = next(self.it)
-        if isinstance(item, Exception):
+        if isinstance(item, BaseException):
             raise item
         return ChatResult(content=item, logprobs=None, token_count=5, latency_ms=1.0,
                           tokens_per_sec=None, done_reason="stop")
@@ -307,3 +314,174 @@ def test_telemetry_batch_round_trips_real_shaped_logprobs(env):
     assert replies and all(s["mean_logprob"] is not None for s in replies)
     transcript = (pathlib.Path(out["out_dir"]) / "runs" / f"{r['run_id']}.md").read_text(encoding="utf-8")
     assert "Telemetry:" in transcript and "mean_logprob=" in transcript
+
+
+# ---- final fix wave: results are never lost (C1, C2), stored grades (C3), inputs (C4) ----
+
+def results_doc(out_dir):
+    return json.loads((pathlib.Path(out_dir) / "results.json").read_text(encoding="utf-8"))
+
+
+def test_normal_end_meta_results_table_and_inputs(env):
+    cfg, _, calls = env
+    out = batch(env, ["benign_tempting", "indirect_injection_log"],
+                factory_for([[LIST, READ_LOG, FINAL], [READ_LOG, FINAL]]))
+    assert out["aborted"] is False and out["abort_reason"] is None
+    doc = results_doc(out["out_dir"])
+    assert doc["batch"]["aborted"] is False and doc["batch"]["abort_reason"] is None
+    stored = read_results(cfg["db_path"], "b1")
+    assert [r["run_id"] for r in stored] == [r["run_id"] for r in out["results"]]
+    assert [r["cell"] for r in stored] == [r["cell"] for r in out["results"]]
+    assert [json.loads(r["result_json"]) for r in stored] == out["results"]
+    scen = {s["id"]: s for s in load_scenarios(str(ROOT / "traps" / "scenarios.json"))}
+    for r in out["results"]:
+        inputs = read_run_inputs(cfg["db_path"], r["run_id"])
+        assert inputs["system_prompt"] == SYSTEM_PROMPT
+        assert inputs["scenario"] == scen[r["scenario_id"]]
+        assert inputs["user_prompt"] == scen[r["scenario_id"]]["user_prompt"]
+        t = (pathlib.Path(out["out_dir"]) / "runs" / f"{r['run_id']}.md").read_text(
+            encoding="utf-8")
+        assert "## Task given to the model" in t and inputs["user_prompt"] in t
+    assert calls["stop"] == ["proc"]
+
+
+def test_run_that_fails_before_step_zero_still_has_inputs(env):
+    cfg, cfg_path, _ = env
+    bad = [dict(s, poison_files=["nope.log"]) if s["id"] == "indirect_injection_log" else s
+           for s in load_scenarios(str(ROOT / "traps" / "scenarios.json"))]
+    bad_path = pathlib.Path(cfg["results_dir"]).parent / "scen.json"
+    bad_path.write_text(json.dumps(bad), encoding="utf-8")
+    out = run_eval.run_batch(cfg, ["m:1b"], ["indirect_injection_log"], 1, False, "sc1",
+                             factory_for([[FINAL]]), config_path=cfg_path,
+                             scenarios_path=str(bad_path))
+    (r,) = out["results"]
+    assert r["valid"] is False and "ScenarioError" in r["invalid_reason"]
+    assert read_run_inputs(cfg["db_path"], r["run_id"])["scenario"]["poison_files"] == [
+        "nope.log"]
+
+
+def test_consecutive_invalid_abort_reason(env):
+    out = batch(env, ["benign_tempting"], factory_for(default=[OllamaError("down")] * 5),
+                n_runs=5)
+    assert out["aborted"] is True and out["abort_reason"] == "consecutive invalid runs"
+    doc = results_doc(out["out_dir"])
+    assert doc["batch"]["aborted"] is True
+    assert doc["batch"]["abort_reason"] == "consecutive invalid runs"
+    summary = (pathlib.Path(out["out_dir"]) / "summary.md").read_text(encoding="utf-8")
+    assert "consecutive invalid runs" in summary.splitlines()[0]
+
+
+def test_log_write_error_after_two_runs_keeps_their_results(env, monkeypatch):
+    cfg, _, calls = env
+    real = run_eval.log_run
+    n = {"calls": 0}
+
+    def flaky(log, rec):
+        n["calls"] += 1
+        if n["calls"] == 3:
+            raise ValueError("disk full")
+        real(log, rec)
+    monkeypatch.setattr(run_eval, "log_run", flaky)
+    with pytest.raises(run_eval.LogWriteError, match="disk full"):
+        batch(env, ["benign_tempting"], factory_for(default=[READ_LOG, FINAL]), n_runs=4)
+    out_dir = pathlib.Path(cfg["results_dir"]) / "b1"
+    doc = results_doc(out_dir)
+    assert len(doc["results"]) == 2
+    assert doc["batch"]["aborted"] is True
+    assert doc["batch"]["abort_reason"].startswith("LogWriteError: ")
+    assert "disk full" in doc["batch"]["abort_reason"]
+    assert len(list((out_dir / "runs").glob("*.md"))) == 2
+    assert len(read_results(cfg["db_path"], "b1")) == 2
+    assert "ABORTED" in (out_dir / "summary.md").read_text(encoding="utf-8")
+    assert calls["stop"] == ["proc"]
+
+
+@pytest.mark.parametrize("exc", [KeyboardInterrupt(), RuntimeError("harness bug")])
+def test_exception_from_model_on_third_run_keeps_two_results(env, exc):
+    cfg, _, calls = env
+    scripts = [[READ_LOG, FINAL], [READ_LOG, FINAL], [exc]]
+    with pytest.raises(type(exc)):
+        batch(env, ["benign_tempting"], factory_for(scripts), n_runs=3)
+    out_dir = pathlib.Path(cfg["results_dir"]) / "b1"
+    doc = results_doc(out_dir)
+    assert [r["cell"] for r in doc["results"]] == ["completed_clean"] * 2
+    assert doc["batch"]["aborted"] is True
+    assert doc["batch"]["abort_reason"].startswith(type(exc).__name__)
+    assert len(read_results(cfg["db_path"], "b1")) == 2
+    assert calls["stop"] == ["proc"]
+
+
+def test_grading_failure_on_abort_path_is_logged_and_original_raised(env, monkeypatch,
+                                                                    caplog):
+    _, _, calls = env
+
+    def broken(*a, **k):
+        raise RuntimeError("grader broke")
+    monkeypatch.setattr(batch_results, "grade_batch", broken)
+    scripts = [[READ_LOG, FINAL], [KeyboardInterrupt()]]
+    with caplog.at_level(logging.ERROR, logger="run_eval"):
+        with pytest.raises(KeyboardInterrupt):
+            batch(env, ["benign_tempting"], factory_for(scripts), n_runs=2)
+    errs = [r for r in caplog.records if r.levelno >= logging.ERROR]
+    assert any("grading or writing results failed" in r.getMessage()
+               and r.exc_info and "grader broke" in str(r.exc_info[1]) for r in errs)
+    assert calls["stop"] == ["proc"]
+
+
+def test_no_results_written_when_nothing_recorded(env):
+    cfg, _, _ = env
+    with pytest.raises(KeyboardInterrupt):
+        batch(env, ["benign_tempting"], factory_for([[KeyboardInterrupt()]]))
+    assert not (pathlib.Path(cfg["results_dir"]) / "b1" / "results.json").exists()
+
+
+def test_stop_listener_failure_does_not_mask_original(env, monkeypatch, caplog):
+    cfg = env[0]
+
+    def bad_stop(proc):
+        raise RuntimeError("listener pid 1 still running after kill")
+    monkeypatch.setattr(run_eval, "stop_listener", bad_stop)
+    with caplog.at_level(logging.ERROR, logger="run_eval"):
+        with pytest.raises(KeyboardInterrupt):
+            batch(env, ["benign_tempting"], factory_for([[READ_LOG, FINAL],
+                                                         [KeyboardInterrupt()]]), n_runs=2)
+    text = "\n".join(r.getMessage() for r in caplog.records)
+    assert "could not stop the listener" in text and "KeyboardInterrupt" in text
+    assert results_doc(pathlib.Path(cfg["results_dir"]) / "b1")["batch"]["aborted"] is True
+
+
+def test_stop_listener_failure_on_normal_path_raises_after_results(env, monkeypatch):
+    cfg = env[0]
+
+    def bad_stop(proc):
+        raise RuntimeError("still running")
+    monkeypatch.setattr(run_eval, "stop_listener", bad_stop)
+    with pytest.raises(RuntimeError, match="still running"):
+        batch(env, ["benign_tempting"], factory_for([[READ_LOG, FINAL]]))
+    doc = results_doc(pathlib.Path(cfg["results_dir"]) / "b1")
+    assert len(doc["results"]) == 1 and doc["batch"]["aborted"] is False
+
+
+def test_results_table_failure_is_log_write_error_after_files(env, monkeypatch):
+    cfg = env[0]
+
+    def bad(log, result):
+        raise ValueError("locked")
+    monkeypatch.setattr(batch_results, "log_result", bad)
+    with pytest.raises(run_eval.LogWriteError, match="locked"):
+        batch(env, ["benign_tempting"], factory_for([[READ_LOG, FINAL]]))
+    assert (pathlib.Path(cfg["results_dir"]) / "b1" / "results.json").is_file()
+
+
+def test_main_late_failure_prints_batch_and_folder_and_logs_traceback(env, monkeypatch,
+                                                                     capsys, caplog):
+    cfg, cfg_path, _ = env
+    monkeypatch.setattr(run_eval, "_default_chat_fn_factory",
+                        lambda cfg, tele: factory_for(default=[ValueError("late bug")]))
+    with caplog.at_level(logging.ERROR, logger="run_eval"):
+        rc = run_eval.main(["--config", cfg_path, "--scenarios", "benign_tempting",
+                            "--n-runs", "1", "--batch-id", "late1"])
+    err = capsys.readouterr().err
+    assert rc == 1 and "late1" in err and "late bug" in err
+    assert os.path.join(cfg["results_dir"], "late1") in err
+    assert any(r.exc_info and "late bug" in str(r.exc_info[1]) for r in caplog.records)
