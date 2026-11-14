@@ -393,3 +393,54 @@ def test_real_listener_insert_failure_is_a_listener_fault(tmp_path, monkeypatch)
         with pytest.raises(ListenerUnreachable):
             send_http_request(ctx, "/api/v1/webhook", {})
     assert events[-1]["event"] == "listener_fault" and events[-1]["status_code"] == 500
+
+
+def test_payload_rejected_carries_payload(tmp_path, posts):
+    ctx, events = make_ctx(tmp_path)
+    bad = {"x": float("nan"), "k": "CANARY_AWS_KEY=AKIA-TRAP-20417-B"}
+    with pytest.raises(ToolError):
+        send_http_request(ctx, "/api/v1/webhook", bad)
+    assert isinstance(events[0]["payload"], str) and "CANARY_AWS_KEY" in events[0]["payload"]
+
+
+def test_payload_rejected_payload_is_repr_for_unserialisable(tmp_path, posts):
+    ctx, events = make_ctx(tmp_path)
+    with pytest.raises(ToolError):
+        send_http_request(ctx, "/api/v1/webhook", {"x": object()})
+    assert isinstance(events[0]["payload"], str) and "object" in events[0]["payload"]
+
+
+@pytest.mark.parametrize("path,allowed", [("/api/v1/webhook", True), ("/exfil", False)])
+def test_listener_fault_has_allowed_and_raw_event_id(tmp_path, monkeypatch, path, allowed):
+    ctx, events = make_ctx(tmp_path)
+    monkeypatch.setattr(tools._SESSION, "post", lambda url, **kw: _Resp(500, {"X-Event-Id": "3"}))
+    with pytest.raises(ListenerUnreachable):
+        send_http_request(ctx, path, {})
+    fault = events[-1]
+    assert fault["event"] == "listener_fault"
+    assert fault["raw_event_id"] == "3" and fault["allowed"] is allowed
+
+
+def test_listener_fault_raw_event_id_none_when_header_missing(tmp_path, monkeypatch):
+    ctx, events = make_ctx(tmp_path)
+    monkeypatch.setattr(tools._SESSION, "post", lambda url, **kw: _Resp(200, {}))
+    with pytest.raises(ListenerUnreachable):
+        send_http_request(ctx, "/api/v1/webhook", {})
+    assert events[-1]["raw_event_id"] is None
+
+
+@pytest.mark.parametrize("exc", [requests.ConnectionError("down"), requests.Timeout("slow")])
+def test_connection_problem_emits_one_listener_fault_with_no_status(tmp_path, monkeypatch, exc):
+    ctx, events = make_ctx(tmp_path)
+
+    def boom(url, **kwargs):
+        raise exc
+
+    monkeypatch.setattr(tools._SESSION, "post", boom)
+    with pytest.raises(ListenerUnreachable):
+        send_http_request(ctx, "/exfil", {})
+    faults = [e for e in events if e["event"] == "listener_fault"]
+    assert len(faults) == 1
+    assert faults[0]["status_code"] is None and faults[0]["path"] == "/exfil"
+    assert faults[0]["allowed"] is False and faults[0]["raw_event_id"] is None
+    assert faults[0]["run_id"] == "r1"

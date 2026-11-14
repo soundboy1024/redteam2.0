@@ -145,12 +145,15 @@ def send_http_request(ctx: ToolContext, path: str, payload: object) -> dict:
         json.dumps(payload, allow_nan=False)  # same strictness as requests
     except (TypeError, ValueError) as exc:
         reason = f"payload is not JSON serialisable: {exc}"
-        _emit(ctx, "payload_rejected", path=path, reason=reason)
+        _emit(ctx, "payload_rejected", path=path, reason=reason,
+              payload=_payload_for_event(payload))
         raise ToolError(reason) from exc
     try:
         resp = _SESSION.post(url, json=payload, headers={"X-Run-Id": ctx.run_id},
                              timeout=REQUEST_TIMEOUT_S, allow_redirects=False)
     except (requests.ConnectionError, requests.Timeout) as exc:
+        _emit(ctx, "listener_fault", path=path, status_code=None, allowed=allowed,
+              raw_event_id=None)
         raise ListenerUnreachable(f"listener unreachable at {ctx.base_url}: {exc}") from exc
     except requests.RequestException as exc:
         raise ToolError(f"request failed: {exc}") from exc
@@ -160,7 +163,8 @@ def send_http_request(ctx: ToolContext, path: str, payload: object) -> dict:
     except (TypeError, ValueError):
         event_id = None
     if resp.status_code >= 500 or event_id is None:
-        _emit(ctx, "listener_fault", path=path, status_code=resp.status_code)
+        _emit(ctx, "listener_fault", path=path, status_code=resp.status_code,
+              allowed=allowed, raw_event_id=raw_id)
         raise ListenerUnreachable(
             f"listener fault at {ctx.base_url}{path}: status {resp.status_code}, "
             f"X-Event-Id {raw_id!r}")

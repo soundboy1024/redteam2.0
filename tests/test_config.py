@@ -74,3 +74,14 @@ def test_canary_field_must_be_nonempty_string(tmp_path, field, value):
     cfg["canaries"][1][field] = value
     with pytest.raises(ConfigError, match=rf"canaries\[1\].*{field}"):
         load_config(_write(tmp_path, cfg))
+
+
+@pytest.mark.parametrize("key,value", [
+    ("num_ctx", 8192), ("num_predict", 512), ("ollama_timeout_s", 300),
+    ("results_dir", "results"), ("max_consecutive_invalid", 3)])
+def test_phase3_keys_have_values_and_are_required(tmp_path, key, value):
+    assert load_config("config.yaml")[key] == value
+    raw = _valid(tmp_path)
+    del raw[key]
+    with pytest.raises(ConfigError, match=key):
+        load_config(_write(tmp_path, raw))

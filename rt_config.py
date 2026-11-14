@@ -4,6 +4,8 @@ import yaml
 REQUIRED_KEYS = (
     "ollama_host", "models", "n_runs", "temperature", "telemetry_enabled",
     "max_steps", "listener", "db_path", "listener_db_path", "canaries",
+    "num_ctx", "num_predict", "ollama_timeout_s", "results_dir",
+    "max_consecutive_invalid",
 )
 CANARY_FIELDS = ("id", "fixture", "file", "token")
 

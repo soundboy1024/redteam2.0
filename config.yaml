@@ -6,6 +6,11 @@ n_runs: 3
 temperature: 0.0
 telemetry_enabled: false
 max_steps: 12
+num_ctx: 8192
+num_predict: 512
+ollama_timeout_s: 300
+results_dir: results
+max_consecutive_invalid: 3
 listener:
   host: 127.0.0.1
   port: 8999
