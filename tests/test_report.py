@@ -51,6 +51,11 @@ def eight():
     ]
 
 
+def read(path):
+    with open(path, encoding="utf-8") as f:
+        return f.read()
+
+
 def test_build_matrix_counts_and_order():
     m = build_matrix(eight())
     assert [(r["model_name"], r["attack_taxonomy"]) for r in m] == [
@@ -89,15 +94,14 @@ def test_results_json_roundtrip(tmp_path):
     rows = eight()
     path = write_results_json(str(tmp_path), META, rows)
     assert os.path.basename(path) == "results.json"
-    data = json.loads(open(path, encoding="utf-8").read())
+    data = json.loads(read(path))
     assert data["batch"] == META and data["results"] == rows
     assert data["limitation"] == LIMITATION_NOTE
     assert data["matrix"] == build_matrix(rows)
 
 
 def test_summary_contents(tmp_path):
-    path = write_summary_md(str(tmp_path), META, eight())
-    text = open(path, encoding="utf-8").read()
+    text = read(write_summary_md(str(tmp_path), META, eight()))
     for word in ("b1", "m1", "m2", "authority_spoof", "benign_control",
                  "listener_fault event", "r5", LIMITATION_NOTE, "substring",
                  "run hit the step cap", "Invalid runs", "Notes", "Totals"):
@@ -110,24 +114,59 @@ def test_summary_contents(tmp_path):
 
 def test_summary_zero_valid_and_aborted(tmp_path):
     rows = [make("x1", "m1", "benign_control", "invalid")]
-    meta = dict(META, aborted=True)
-    text = open(write_summary_md(str(tmp_path), meta, rows), encoding="utf-8").read()
-    assert "n/a" in text
-    assert "0" in text
+    text = read(write_summary_md(str(tmp_path), dict(META, aborted=True), rows))
+    assert "0 (n/a)" in text
     assert text.splitlines()[0].lower().startswith("**batch aborted")
     assert "incomplete" in text.splitlines()[0]
 
 
 def test_summary_none_sections(tmp_path):
+    rows = [make("x1", "m1", "benign_control", "completed_clean"),
+            make("x2", "m2", "benign_control", "completed_clean")]
+    assert "None" in read(write_summary_md(str(tmp_path), META, rows))
+
+
+def test_summary_zero_results_and_missing_model(tmp_path):
+    meta = dict(META, models=["m1", "ghost"])
+    text = read(write_summary_md(str(tmp_path), meta, []))
+    assert "No runs were recorded." in text
+    assert "No runs recorded for model m1." in text
+    assert "No runs recorded for model ghost." in text
     rows = [make("x1", "m1", "benign_control", "completed_clean")]
-    text = open(write_summary_md(str(tmp_path), META, rows), encoding="utf-8").read()
-    assert "None" in text
+    text = read(write_summary_md(str(tmp_path), meta, rows))
+    assert "No runs recorded for model ghost." in text
+    assert "model m1." not in text
+
+
+def test_summary_no_reason_recorded(tmp_path):
+    rows = [make("x1", "m1", "benign_control", "invalid", invalid_reason=None)]
+    assert "(no reason recorded)" in read(write_summary_md(str(tmp_path), META, rows))
+
+
+EVIL = "line1\n## Forged | cell <script>alert(1)</script> `tick`"
+
+
+def test_summary_untrusted_text_stays_inline(tmp_path):
+    rows = [make("x1", "m1", "benign_control", "invalid", invalid_reason=EVIL),
+            make("x2", "m1", "benign_control", "completed_clean", notes=[EVIL])]
+    text = read(write_summary_md(str(tmp_path), META, rows))
+    assert not any(line.startswith("## Forged") for line in text.splitlines())
+    assert "<script>" not in text and "&lt;script&gt;" in text
+    assert "\\`tick\\`" in text and "\\|" in text
+    assert text.count("## Forged") == 2
+
+
+def test_transcript_invalid_reason_cannot_forge(tmp_path):
+    res = make("run-3", "m1", "benign_control", "invalid", invalid_reason=EVIL)
+    text = read(write_transcript_md(str(tmp_path), res, [], [], []))
+    assert not any(line.startswith("## Forged") for line in text.splitlines())
 
 
 def steps_for(raw_texts, poison_at=None):
     rows = []
     for i, raw in enumerate(raw_texts):
-        rows.append({"step_index": i, "agent_state": "TOOL_DECISION", "tool_name": "read_workspace_file",
+        rows.append({"step_index": i, "agent_state": "TOOL_DECISION",
+                     "tool_name": "read_workspace_file",
                      "tool_args_json": '{"filename": "a"}', "raw_response": raw,
                      "tool_result": "x" * 2500 if i == 1 else "ok",
                      "poison_ingested": poison_at is not None and i >= poison_at,
@@ -142,34 +181,62 @@ def test_transcript_verbatim_truncation_and_poison(tmp_path):
     long_raw = "r" * 5000
     steps = steps_for([raw_tick, raw_uni, long_raw], poison_at=1)
     res = make("run-1", "m1", "authority_spoof", "completed_clean")
-    path = write_transcript_md(str(tmp_path), res, steps,
-                               [{"event": "http_sent", "timestamp": "t", "path": "/a|b", "event_id": 1}],
-                               [{"id": 1, "timestamp": "t", "method": "POST", "path": "/x",
-                                 "route_class": "legit", "canary_ids": [],
-                                 "tripwire_canary_exfiltrated": False,
-                                 "tripwire_honeypot_endpoint_hit": False,
-                                 "body_text": "{}", "query_string": ""}])
+    path = write_transcript_md(
+        str(tmp_path), res, steps,
+        [{"event": "http_sent", "timestamp": "t", "path": "/a|b", "event_id": 1}],
+        [{"id": 1, "timestamp": "t", "method": "POST", "path": "/x",
+          "route_class": "legit", "canary_ids": [],
+          "tripwire_canary_exfiltrated": False,
+          "tripwire_honeypot_endpoint_hit": False,
+          "body_text": "{}", "query_string": ""}])
     assert path.endswith(os.path.join("runs", "run-1.md"))
-    text = open(path, encoding="utf-8").read()
+    text = read(path)
     assert raw_tick in text and raw_uni in text and long_raw in text
     assert "[truncated, 500 more characters]" in text
     assert "x" * 2000 in text and "x" * 2001 not in text
     assert text.count(">>> poison in context from this step") == 1
-    # fence around the backtick reply is longer than 4 backticks
     assert "`````\n" + raw_tick in text
 
 
 def test_transcript_invalid_reason_on_top_and_telemetry(tmp_path):
     res = make("run-2", "m1", "benign_control", "invalid")
-    text = open(write_transcript_md(str(tmp_path), res, steps_for(["a", "b"]), [], []),
-                encoding="utf-8").read()
-    head = text[:400]
-    assert "listener_fault event" in head
+    text = read(write_transcript_md(str(tmp_path), res, steps_for(["a", "b"]), [], []))
+    assert "listener_fault event" in text[:400]
     assert "token_count" in text
 
 
-@pytest.mark.parametrize("bad", ["../x", "a/b", "", "a b", "x" * 65, "a.md", "..\\x"])
+@pytest.mark.parametrize("n,trunc", [(2000, False), (2001, True)])
+def test_tool_result_truncation_boundary(tmp_path, n, trunc):
+    steps = steps_for(["a", "b"])
+    steps[1]["tool_result"] = "y" * n
+    res = make("run-4", "m1", "benign_control", "completed_clean")
+    text = read(write_transcript_md(str(tmp_path), res, steps, [], []))
+    assert ("[truncated, 1 more characters]" in text) is trunc
+    assert "y" * 2000 in text
+
+
+@pytest.mark.parametrize("bad", ["../x", "a/b", "", "a b", "x" * 65, "a.md", "..\\x",
+                                 "abc\n", "CON", "nul", "Com1", "lpt9"])
 def test_transcript_rejects_bad_run_id(tmp_path, bad):
     res = make(bad, "m1", "benign_control", "completed_clean")
     with pytest.raises(ValueError):
         write_transcript_md(str(tmp_path), res, [], [], [])
+
+
+def test_surrogate_transcript_and_json(tmp_path):
+    steps = steps_for(["a\ud800b", "ok"])
+    res = make("t1", "m1", "benign_control", "completed_clean", notes=["n\ud800"])
+    p = write_transcript_md(str(tmp_path), res, steps, [], [])
+    assert os.path.getsize(p) > 0 and "a\\ud800b" in read(p)
+    j = write_results_json(str(tmp_path), META, [res])
+    data = json.loads(read(j))
+    assert data["results"][0]["notes"] == ["n\\ud800"]
+
+
+def test_write_failure_leaves_nothing(tmp_path, monkeypatch):
+    def boom(*a, **k):
+        raise OSError("disk")
+    monkeypatch.setattr(os, "replace", boom)
+    with pytest.raises(OSError):
+        write_results_json(str(tmp_path), META, eight())
+    assert os.listdir(tmp_path) == []

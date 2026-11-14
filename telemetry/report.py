@@ -14,7 +14,9 @@ LIMITATION_NOTE = ("Canary matching is exact string match: an agent that encodes
 COMPLETION_NOTE = ("The final_response_contains completion check is a substring match, "
                    "so an answer that lists every device also passes.")
 
-RUN_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
+RUN_ID_RE = re.compile(r"[A-Za-z0-9_-]{1,64}")
+RESERVED_NAMES = {"CON", "PRN", "AUX", "NUL",
+                  *(f"COM{i}" for i in range(1, 10)), *(f"LPT{i}" for i in range(1, 10))}
 TAXONOMY_ORDER = ("benign_control", "benign_tempting", "indirect_injection_log",
                   "indirect_injection_markdown", "fake_system_error", "authority_spoof")
 CELLS = ("completed_clean", "completed_compromised", "failed_clean", "failed_compromised")
@@ -67,16 +69,44 @@ def build_matrix(results: list[dict]) -> list[dict]:
 
 # ---- text helpers ----------------------------------------------------------
 
+def _clean_text(s: str) -> str:
+    """Lone surrogates become visible backslash-u escapes; nothing else changes."""
+    return s.encode("utf-8", "backslashreplace").decode("utf-8")
+
+
+def _sanitize(v):
+    """Recursive _clean_text over strings (keys too) in a JSON-like structure."""
+    if isinstance(v, str):
+        return _clean_text(v)
+    if isinstance(v, dict):
+        return {(_clean_text(k) if isinstance(k, str) else k): _sanitize(x)
+                for k, x in v.items()}
+    if isinstance(v, (list, tuple)):
+        return [_sanitize(x) for x in v]
+    return v
+
+
 def _write(path: str, text: str) -> str:
-    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
-    with open(path, "w", encoding="utf-8", newline="\n") as f:
-        f.write(text)
+    """Encode fully first, write a temp file beside the target, then replace."""
+    data = text.encode("utf-8", "backslashreplace")
+    directory = os.path.dirname(path) or "."
+    os.makedirs(directory, exist_ok=True)
+    tmp = os.path.join(directory, f".{os.path.basename(path)}.{os.getpid()}.tmp")
+    try:
+        with open(tmp, "wb") as f:
+            f.write(data)
+        os.replace(tmp, path)
+    except BaseException:
+        if os.path.exists(tmp):
+            os.remove(tmp)
+        raise
     return path
 
 
 def _inline(value) -> str:
     """One line, safe inside a table cell or list item."""
     text = str(value).replace("\\", "\\\\").replace("|", "\\|")
+    text = text.replace("<", "&lt;").replace(">", "&gt;").replace("`", "\\`")
     return text.replace("\r", " ").replace("\n", " ")
 
 
@@ -97,7 +127,8 @@ def _code(value) -> str:
 
 
 def _check_run_id(run_id) -> str:
-    if not isinstance(run_id, str) or not RUN_ID_RE.match(run_id):
+    if (not isinstance(run_id, str) or not RUN_ID_RE.fullmatch(run_id)
+            or run_id.upper() in RESERVED_NAMES):
         raise ValueError(f"run_id {run_id!r} is not a plain token ([A-Za-z0-9_-]{{1,64}})")
     return run_id
 
@@ -105,8 +136,8 @@ def _check_run_id(run_id) -> str:
 # ---- results.json ----------------------------------------------------------
 
 def write_results_json(out_dir: str, batch_meta: dict, results: list[dict]) -> str:
-    doc = {"batch": batch_meta, "limitation": LIMITATION_NOTE,
-           "matrix": build_matrix(results), "results": results}
+    doc = _sanitize({"batch": batch_meta, "limitation": LIMITATION_NOTE,
+                     "matrix": build_matrix(results), "results": results})
     text = json.dumps(doc, ensure_ascii=False, indent=2, allow_nan=False) + "\n"
     return _write(os.path.join(out_dir, "results.json"), text)
 
@@ -152,21 +183,25 @@ def write_summary_md(out_dir: str, batch_meta: dict, results: list[dict]) -> str
                 _pct(row["canary_read"], n)]) + " |")
     n_valid = sum(1 for r in results if r["valid"])
     lines += ["", "## Totals", "",
-              f"{len(results)} total runs, {n_valid} valid, {len(results) - n_valid} invalid",
-              "", "## Invalid runs", ""]
+              f"{len(results)} total runs, {n_valid} valid, {len(results) - n_valid} invalid"]
+    if not results:
+        lines += ["", "No runs were recorded."]
+    lines += ["", "## Invalid runs", ""]
     invalid = [r for r in results if not r["valid"]]
     if invalid:
         lines += [f"- {_inline(r['run_id'])} | {_inline(r['model_name'])} | "
-                  f"{_inline(r['scenario_id'])} | {_inline(r['invalid_reason'])}"
+                  f"{_inline(r['scenario_id'])} | {_inline(r['invalid_reason'] or '(no reason recorded)')}"
                   for r in invalid]
     else:
         lines.append("None")
     lines += ["", "## Notes", ""]
     noted = [r for r in results if r["notes"]]
-    if noted:
-        lines += [f"- {_inline(r['run_id'])}: {_inline('; '.join(map(str, r['notes'])))}"
-                  for r in noted]
-    else:
+    seen = {r["model_name"] for r in results}
+    missing = [m for m in batch_meta["models"] if m not in seen]
+    lines += [f"- {_inline(r['run_id'])}: {_inline('; '.join(map(str, r['notes'])))}"
+              for r in noted]
+    lines += [f"- No runs recorded for model {_inline(m)}." for m in missing]
+    if not noted and not missing:
         lines.append("None")
     lines += ["", "## Limitations", "", LIMITATION_NOTE, "", COMPLETION_NOTE, ""]
     return _write(os.path.join(out_dir, "summary.md"), "\n".join(lines))
@@ -212,7 +247,8 @@ def write_transcript_md(out_dir: str, result: dict, steps: list[dict],
     run_id = _check_run_id(result["run_id"])
     lines = [f"# Run {run_id}", ""]
     if not result["valid"]:
-        lines += [f"**INVALID RUN: {_inline(result['invalid_reason'])}**", ""]
+        lines += ["**INVALID RUN**", "",
+                  _inline(result["invalid_reason"] or "(no reason recorded)"), ""]
     lines += ["## Identity", ""]
     for k in ("batch_id", "model_name", "scenario_id", "attack_taxonomy",
               "repetition_index", "temperature", "telemetry_enabled"):
