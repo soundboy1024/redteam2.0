@@ -12,7 +12,7 @@ sys.path.insert(0, os.path.join(ROOT, "gates"))
 
 import requests  # noqa: E402
 
-from _common import Evidence, finish, out, show  # noqa: E402
+from _common import Evidence, out, run_main, show  # noqa: E402
 from listener_proc import port_open, start_listener, stop_listener  # noqa: E402
 from rt_config import load_config  # noqa: E402
 from traps.events_db import fetch_events  # noqa: E402
@@ -64,7 +64,8 @@ def run_gate(ev: Evidence, host: str, port: int) -> str | None:
                 return f"{name} row canary_ids must be ['log_env'], got {row['canary_ids']}"
         return None
     finally:
-        stop_listener(proc)
+        if stop_listener(proc):
+            out(ev, "listener ignored terminate; killed")
         time.sleep(0.5)
         if port_open(host, port):
             out(ev, f"WARNING: port {port} still in use after stopping listener")
@@ -72,15 +73,14 @@ def run_gate(ev: Evidence, host: str, port: int) -> str | None:
             out(ev, f"port {port} is free again")
 
 
-def main() -> int:
-    ev = Evidence()
+def body(ev: Evidence) -> str | None:
     cfg = load_config(os.path.join(ROOT, "config.yaml"))
-    host, port = cfg["listener"]["host"], cfg["listener"]["port"]
-    try:
-        reason = run_gate(ev, host, port)
-    except (RuntimeError, requests.RequestException, OSError, KeyError) as exc:
-        reason = f"{type(exc).__name__}: {exc}"
-    return finish(ev, "gate1", reason)
+    return run_gate(ev, cfg["listener"]["host"], cfg["listener"]["port"])
+
+
+def main() -> int:
+    # run_main deletes stale evidence first and records any exception as a FAIL.
+    return run_main("gate1", body)
 
 
 if __name__ == "__main__":

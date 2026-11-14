@@ -16,10 +16,8 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
 sys.path.insert(0, os.path.join(ROOT, "gates"))
 
-import requests  # noqa: E402
-
-from _common import Evidence, finish, out, show  # noqa: E402
-from harness.tools import (ListenerUnreachable, ToolContext, ToolError, read_workspace_file,  # noqa: E402
+from _common import Evidence, out, run_main, show  # noqa: E402
+from harness.tools import (ToolContext, ToolError, read_workspace_file,  # noqa: E402
                            send_http_request)
 from listener_proc import port_open, start_listener, stop_listener  # noqa: E402
 from rt_config import load_config  # noqa: E402
@@ -104,7 +102,8 @@ def run_gate(ev: Evidence, host: str, port: int) -> str | None:
         return (run_checker(ev, "scripts/check_rules.py", ["scripts/check_rules.py"])
                 or run_checker(ev, "traps.validate_scenarios", ["-m", "traps.validate_scenarios"]))
     finally:
-        stop_listener(proc)
+        if stop_listener(proc):
+            out(ev, "listener ignored terminate; killed")
         shutil.rmtree(tmp, ignore_errors=True)
         time.sleep(0.5)
         if port_open(host, port):
@@ -113,16 +112,14 @@ def run_gate(ev: Evidence, host: str, port: int) -> str | None:
             out(ev, f"port {port} is free again")
 
 
-def main() -> int:
-    ev = Evidence()
+def body(ev: Evidence) -> str | None:
     cfg = load_config(os.path.join(ROOT, "config.yaml"))
-    host, port = cfg["listener"]["host"], cfg["listener"]["port"]
-    try:
-        reason = run_gate(ev, host, port)
-    except (RuntimeError, requests.RequestException, OSError, KeyError, ValueError,
-            StopIteration, ListenerUnreachable, ToolError) as exc:
-        reason = f"{type(exc).__name__}: {exc}"
-    return finish(ev, "gate2", reason)
+    return run_gate(ev, cfg["listener"]["host"], cfg["listener"]["port"])
+
+
+def main() -> int:
+    # run_main deletes stale evidence first and records any exception as a FAIL.
+    return run_main("gate2", body)
 
 
 if __name__ == "__main__":

@@ -18,10 +18,13 @@ def port_open(host: str, port: int) -> bool:
         return s.connect_ex((host, port)) == 0
 
 
-def stop_listener(proc: subprocess.Popen) -> None:
+def stop_listener(proc: subprocess.Popen) -> bool:
+    """Stop a listener this process started. Returns True if it ignored terminate and
+    had to be killed."""
     proc.terminate()
     try:
         proc.wait(timeout=10)
+        return False
     except subprocess.TimeoutExpired:
         log.warning("listener ignored terminate; killing the process this run started")
         proc.kill()
@@ -30,6 +33,7 @@ def stop_listener(proc: subprocess.Popen) -> None:
         except subprocess.TimeoutExpired as exc:
             log.error("listener pid %s still running after kill", proc.pid)
             raise RuntimeError(f"listener pid {proc.pid} still running after kill") from exc
+    return True
 
 
 def _wait_healthy(base: str, proc: subprocess.Popen, wait_s: int) -> None:

@@ -138,3 +138,30 @@ def test_stop_listener_raises_when_kill_does_not_work():
 
     with pytest.raises(RuntimeError, match="4242"):
         listener_proc.stop_listener(Stubborn())
+
+
+# ---- final fix wave: stop_listener reports a kill (F7) ----
+
+def test_stop_listener_returns_false_after_clean_terminate():
+    proc = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
+    assert listener_proc.stop_listener(proc) is False
+
+
+def test_stop_listener_returns_true_when_it_had_to_kill():
+    class IgnoresTerminate:
+        pid = 77
+        killed = False
+
+        def terminate(self):
+            pass
+
+        def kill(self):
+            self.killed = True
+
+        def wait(self, timeout):
+            if not self.killed:
+                raise subprocess.TimeoutExpired("x", timeout)
+            return -9
+
+    p = IgnoresTerminate()
+    assert listener_proc.stop_listener(p) is True and p.killed
