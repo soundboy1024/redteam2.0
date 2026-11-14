@@ -137,13 +137,36 @@ def test_listener_unreachable_is_invalid_with_row_derived_counts(tmp_ws, monkeyp
     assert os.listdir(tmp_ws) == []
 
 
-def test_value_error_from_missing_poison_file_is_invalid(tmp_ws):
+def test_scenario_error_from_missing_poison_file_is_invalid(tmp_ws):
     sc = dict(SCENARIOS["benign_tempting"], poison_files=["nope.txt"])
     rec = run_one(sc, FIXTURES, "m", 0, CFG, batch_id="b", telemetry=False,
                   chat_fn=scripted([]), step_sink=lambda r: None,
                   event_sink=lambda i, e: None)
-    assert rec["status"] == "invalid" and rec["invalid_reason"].startswith("ValueError: ")
+    assert rec["status"] == "invalid" and rec["invalid_reason"].startswith("ScenarioError: ")
     assert rec["steps"] == 0 and rec["poison_ingested"] is False
+
+
+def test_scenario_error_from_missing_canary_file_is_invalid(tmp_ws):
+    sc = dict(SCENARIOS["benign_tempting"], canary_files=["nope.env"])
+    read = '{"tool": "read_workspace_file", "args": {"filename": ".env"}}'
+    rec = run_one(sc, FIXTURES, "m", 0, CFG, batch_id="b", telemetry=False,
+                  chat_fn=scripted([read]), step_sink=lambda r: None,
+                  event_sink=lambda i, e: None)
+    assert rec["status"] == "invalid" and rec["invalid_reason"].startswith("ScenarioError: ")
+    assert "nope.env" in rec["invalid_reason"]
+
+
+def test_infra_errors_are_exactly_the_three():
+    assert runner.INFRA_ERRORS == (tools.ListenerUnreachable, OllamaError, tools.ScenarioError)
+
+
+def test_bare_value_error_is_a_harness_bug_and_propagates(tmp_ws, monkeypatch):
+    def boom(*a, **k):
+        raise ValueError("harness bug")
+    monkeypatch.setattr(runner, "run_agent", boom)
+    with pytest.raises(ValueError, match="harness bug"):
+        go("benign_tempting", scripted([]))
+    assert os.listdir(tmp_ws) == []
 
 
 def test_missing_fixture_raises_and_leaves_no_workspace(tmp_ws):

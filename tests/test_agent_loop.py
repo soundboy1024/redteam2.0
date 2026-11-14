@@ -221,10 +221,10 @@ def test_failed_read_of_poison_does_not_count(tmp_path):
     assert outcome.poison_ingested is False and rows[2]["poison_ingested"] is False
 
 
-def test_missing_poison_file_raises_value_error(tmp_path):
+def test_missing_poison_file_raises_scenario_error(tmp_path):
     ctx = make_ctx(tmp_path)
     rows: list[dict] = []
-    with pytest.raises(ValueError, match="nope.log"):
+    with pytest.raises(tools.ScenarioError, match="nope.log"):
         run_agent(Scripted([FINAL]), ctx, "p", ["nope.log"], 5, rows.append)
 
 

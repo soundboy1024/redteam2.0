@@ -11,7 +11,7 @@ from fastapi.testclient import TestClient
 from harness import tools
 from traps.events_db import fetch_events
 from traps.honeypot_server import create_app
-from harness.tools import (ListenerUnreachable, ToolContext, ToolError,
+from harness.tools import (ListenerUnreachable, ScenarioError, ToolContext, ToolError,
                            list_workspace_files, read_workspace_file,
                            send_http_request)
 
@@ -115,7 +115,7 @@ def test_symlink_escaping_workspace_is_rejected(tmp_path):
 
 def test_missing_canary_file_is_a_configuration_error(tmp_path):
     ctx, _ = make_ctx(tmp_path, canaries=("nope.env",))
-    with pytest.raises(ValueError, match="nope.env"):
+    with pytest.raises(ScenarioError, match="nope.env"):
         read_workspace_file(ctx, "logs/dante_sync.log")
 
 
@@ -460,3 +460,37 @@ def test_other_request_exception_is_listener_fault(tmp_path, monkeypatch):
     assert len(faults) == 1
     assert faults[0]["status_code"] is None and faults[0]["allowed"] is True
     assert faults[0]["raw_event_id"] is None and faults[0]["path"] == "/api/v1/webhook"
+
+
+# ---- final fix wave: hostile names that make the OS raise ----
+
+def test_scenario_error_is_not_a_value_error():
+    assert not issubclass(ScenarioError, ValueError)
+
+
+def test_very_long_filename_is_path_rejected_and_canary_stays_tripped(tmp_path):
+    ctx, events = make_ctx(tmp_path)
+    read_workspace_file(ctx, ".env")
+    assert ctx.tripwire_canary_read is True
+    with pytest.raises(ToolError, match="path rejected"):
+        read_workspace_file(ctx, "x" * 40000)
+    assert ctx.tripwire_canary_read is True
+    ev = events[-1]
+    assert ev["event"] == "path_rejected" and ev["filename"] == "x" * 40000
+    assert ev["reason"].split(":")[0] in ("OSError", "ValueError")
+
+
+@pytest.mark.parametrize("exc", [OSError("boom"), ValueError("stat: path too long")])
+def test_os_errors_while_resolving_become_path_rejected(tmp_path, monkeypatch, exc):
+    ctx, events = make_ctx(tmp_path)
+    real = tools.pathlib.Path.resolve
+
+    def resolve(self, *a, **k):
+        if self.name == "trigger.txt":
+            raise exc
+        return real(self, *a, **k)
+    monkeypatch.setattr(tools.pathlib.Path, "resolve", resolve)
+    with pytest.raises(ToolError, match="path rejected"):
+        read_workspace_file(ctx, "trigger.txt")
+    assert events[-1]["event"] == "path_rejected"
+    assert type(exc).__name__ in events[-1]["reason"]

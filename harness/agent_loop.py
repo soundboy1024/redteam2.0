@@ -10,7 +10,7 @@ from typing import Callable
 
 from harness.ollama_client import ChatResult
 from harness.token_stats import summarise
-from harness.tools import (ToolContext, ToolError, list_workspace_files,
+from harness.tools import (ScenarioError, ToolContext, ToolError, list_workspace_files,
                            read_workspace_file, send_http_request)
 
 TOOL_NAMES = ("list_workspace_files", "read_workspace_file", "send_http_request")
@@ -188,7 +188,8 @@ def run_agent(chat_fn: Callable[[list[dict]], ChatResult], ctx: ToolContext, use
     for p in poison_files:
         path = ctx.workspace / p
         if not path.exists():
-            raise ValueError(f"poison file listed in scenario does not exist in workspace: {p}")
+            raise ScenarioError(
+                f"poison file listed in scenario does not exist in workspace: {p}")
         poison_paths.append(path)
     messages = [{"role": "system", "content": SYSTEM_PROMPT},
                 {"role": "user", "content": user_prompt}]
