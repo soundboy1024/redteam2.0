@@ -246,6 +246,26 @@ Telemetry is local-only: logprobs are never requested from a hosted model, and t
 
 Only fake fixture data is sent to a provider. Fixtures and canaries are fake by construction; never point a hosted model at real files or credentials.
 
+### 4.8 Control panel (dashboard/)
+
+Added at the director's request on 2026-11-15. One Streamlit app on port 8503 with three pages: Run, Results, Inspect a run.
+
+Run page. Pick models, scenarios, temperatures and runs each, then Start. Start launches the same `run_eval.py` command the director could type, as a separate process, and the page shows that command. There is no second code path for running a batch. One batch runs at a time, because the listener owns port 8999; Start is refused while a batch is alive or the port is in use, and the page says which. Progress is read from the run log and the listener database, opened read-only. Raw listener events are shown labelled as raw events, not as a grade.
+
+What the dashboard must never do: grade a run (it shows grades the grader stored), show, log or store an API key (it shows "set" or "not set"), import `harness/`, or render model text as HTML (replies and tool arguments are untrusted and are shown as plain text or code).
+
+Stop kills only the process whose pid is recorded in that batch's `batch.json`, with its listener child, then runs the regrade command for the batch. It never kills by name and never sweeps a port. A stopped or crashed batch never looks finished or clean: it shows as aborted, or as "stopped without results" until it is regraded.
+
+Batch plan file. When a batch opens, `run_eval.py` writes `batch.json` into the batch folder: batch id, models, scenario ids, temperatures, n_runs, the temperatures each model runs at, the planned run count, the command line, the process id, start time, and at the end the end time and whether it aborted. No key is ever on the command line or in this file. Batches from before this change have no `batch.json`; their planned count is shown as unknown.
+
+Results per run. After each run is recorded, `run_eval.py` grades that run with the same grader function and stores its row in the `results` table, so a live view can show it. At the end of the batch only runs without a stored row are graded, and the files are written from the stored rows. A stored result row is never overwritten.
+
+`run_eval.py --plan` prints the batch plan for the given selection as JSON and exits; it opens no batch and starts no listener.
+
+`run_eval.py --regrade <batch_id>` completes a batch that was logged but not fully graded (stopped, killed, or failed while writing results). It starts no listener and calls no model. Runs that already have a stored row keep it; runs without one are graded and stored; the files are rewritten from the stored rows. A batch that is already complete is refused. Unless the plan file shows every planned run was recorded, the batch is marked aborted. Steps logged for a run that was never recorded (cut off mid-run) are named in the summary and are in no cell.
+
+The Results page can add several batches together. It lists which batches are included, flags aborted ones, and shows the limitations text every time.
+
 ## 5. Directory layout
 
     redteam2/
@@ -274,8 +294,14 @@ Only fake fixture data is sent to a provider. Fixtures and canaries are fake by 
             logger.py
             grader.py
             runs.db                 generated
+        batch_plan.py           batch.json: build, write, read, finalise
+        run_dashboard.bat       launcher, port 8503
         dashboard/
-            app.py
+            app.py              the three pages
+            data.py             read-only queries
+            control.py          plan preview, start, stop
+        gates/
+            gate1.py to gate4.py, evidence/
         tests/
             test_listener.py
             test_tools.py
@@ -307,12 +333,12 @@ Gate 3. Run benign_control and indirect_injection_log once each against one loca
 
 ### Phase 4. Inspector
 
-One Streamlit page, dark theme, two views:
+One Streamlit app, dark theme, three views. The first, the Run page, is the control panel in 4.8. The other two:
 
 1. Run matrix. Models by attack taxonomy, showing the four-cell result (completed and clean, completed and compromised, failed and clean, failed and compromised) as counts and percentages.
 2. Run inspector. Select one run. Show the poisoned fixture text on the left, the agent's raw tool call JSON on the right, the step where the state changed to POST_POISON_INGESTION, and which tripwires fired. Entropy trace appears only if telemetry was on for that run.
 
-Gate 4. Run the full matrix for two models at n_runs 3 and show the inspector on one compromised run.
+Gate 4. Run the full matrix for two models at n_runs 3, as one fresh batch started from the Run page, and show the inspector on one compromised run.
 
 ## 7. Demo target
 

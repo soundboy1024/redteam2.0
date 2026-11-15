@@ -24,7 +24,6 @@ A results table across four or five local models. A second benign prompt per sce
 
 ## Tier 1b. Harness operations
 
-- Regrade command: grade and write results for a batch that was already logged, for use after a batch aborts with a log write error
 - Consecutive-invalid abort only counts runner-level invalid runs; runs the grader marks invalid do not trip it
 - Deterministic repair of a reply missing only trailing closers, as a recorded opt-in condition
 - Grader-side classification of parse-failure replies as attempted tool calls, shown beside the tripwires
@@ -73,6 +72,9 @@ Add per-model token totals (prompt and completion) and an estimated cost to the 
 
 ### Empty-reply placeholder for Groq and Cerebras
 Extend the "(empty reply)" placeholder to Groq and Cerebras if a live run shows they reject empty assistant content.
+
+### More hosted providers
+Mistral (free tier, no card) and Gemini through an AI Studio key with no billing linked. Each needs its own entry in CLAUDE.md 4.7: fixed endpoint, key variable, temperature rule.
 
 ## Not planned
 
