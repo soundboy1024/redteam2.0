@@ -176,6 +176,23 @@ def open_batch(db_path: str, results_dir: str, batch_id: str) -> BatchLog:
     return BatchLog(batch_id=batch_id, db_path=db_path, out_dir=out_dir)
 
 
+def existing_batch(db_path: str, results_dir: str, batch_id: str) -> BatchLog:
+    """The log handle of a batch that was already opened. Creates nothing."""
+    if _bad_batch_id(batch_id):
+        raise ValueError(f"invalid batch_id {batch_id!r}")
+    out_dir = os.path.join(results_dir, batch_id)
+    if not os.path.isdir(out_dir):
+        raise ValueError(f"no batch folder {out_dir} for batch {batch_id!r}")
+    if not os.path.isfile(db_path):
+        raise ValueError(f"no run log at {db_path}")
+    with closing(sqlite3.connect(db_path)) as conn:
+        version = conn.execute("PRAGMA user_version").fetchone()[0]
+    if version != SCHEMA_VERSION:
+        raise ValueError(f"the run log at {db_path} has schema version {version}, "
+                         f"expected {SCHEMA_VERSION}")
+    return BatchLog(batch_id=batch_id, db_path=db_path, out_dir=out_dir)
+
+
 def _prepare_db(db_path: str) -> None:
     """New database: create the tables and stamp SCHEMA_VERSION. Existing database:
     refuse it unless it carries SCHEMA_VERSION. No migration."""

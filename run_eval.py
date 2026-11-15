@@ -2,9 +2,12 @@
 
 Usage: .venv/Scripts/python.exe run_eval.py [--config config.yaml] [--models a,b]
        [--scenarios id,id] [--n-runs N] [--temperatures 0.1,0.3] [--telemetry|--no-telemetry] [--batch-id ID]
+       .venv/Scripts/python.exe run_eval.py <the same flags> --plan
+       .venv/Scripts/python.exe run_eval.py --regrade BATCH_ID
        .venv/Scripts/python.exe run_eval.py --list-remote-models anthropic|groq|cerebras
 """
 import argparse
+import json
 import logging
 import math
 import os
@@ -14,14 +17,17 @@ from datetime import datetime, timezone
 from functools import partial
 from typing import Callable
 
-from batch_results import LogWriteError, write_batch_results
+import batch_plan
+from batch_results import (LogWriteError, grade_and_store_run,
+                           write_batch_results)
 from harness import ollama_client, remote_client
 from harness.agent_loop import SYSTEM_PROMPT
 from harness.runner import load_scenarios, run_one
 from listener_proc import start_listener, stop_listener
 from rt_config import ConfigError, load_config
-from telemetry.logger import (JSONL_FILES, log_run, log_run_inputs, log_step,
-                              log_tool_event, open_batch)
+from telemetry.logger import (JSONL_FILES, existing_batch, log_run, log_run_inputs,
+                              log_step, log_tool_event, open_batch, read_result_rows,
+                              read_runs, read_step_run_ids)
 from traps.validate_scenarios import validate
 
 log = logging.getLogger(__name__)
@@ -113,10 +119,13 @@ def _default_chat_fn_factory(cfg: dict, telemetry: bool) -> Callable:
 def _remove_empty_batch(batch_log) -> None:
     """Undo open_batch after a failed listener start, if nothing was written."""
     try:
-        names = sorted(os.listdir(batch_log.out_dir))
+        names = sorted(n for n in os.listdir(batch_log.out_dir)
+                       if n != batch_plan.PLAN_FILE)
         if names != sorted(JSONL_FILES) or any(
                 os.path.getsize(os.path.join(batch_log.out_dir, n)) for n in names):
             return
+        if os.path.exists(os.path.join(batch_log.out_dir, batch_plan.PLAN_FILE)):
+            names.append(batch_plan.PLAN_FILE)
         for n in names:
             os.remove(os.path.join(batch_log.out_dir, n))
         os.rmdir(batch_log.out_dir)
@@ -128,7 +137,8 @@ def prepare_batch(cfg: dict, models: list[str], scenario_ids: list[str], n_runs:
                   telemetry: bool, batch_id: str, chat_fn_factory: Callable | None = None,
                   *, temperatures: list, config_path: str,
                   scenarios_path: str = SCENARIOS_PATH,
-                  fixtures_root: str = FIXTURES_ROOT) -> PreparedBatch:
+                  fixtures_root: str = FIXTURES_ROOT,
+                  command: list | None = None) -> PreparedBatch:
     """Config check and batch opening: everything that may fail before a run starts."""
     file_cfg = load_config(config_path)
     for key in ("canaries", "listener"):
@@ -141,9 +151,18 @@ def prepare_batch(cfg: dict, models: list[str], scenario_ids: list[str], n_runs:
     factory = chat_fn_factory or _default_chat_fn_factory(cfg, telemetry)
     # Before anything is launched, so a bad or reused batch id fails first.
     batch_log = open_batch(cfg["db_path"], cfg["results_dir"], batch_id)
+    batch_plan.write_plan(batch_log.out_dir, _plan(
+        batch_id, models, scenario_ids, temperatures, n_runs, telemetry, command))
     return PreparedBatch(cfg, config_path, batch_log, scenarios, chosen, list(models),
                          list(scenario_ids), n_runs, telemetry, list(temperatures), factory,
                          fixtures_root)
+
+
+def _plan(batch_id: str, models: list, scenario_ids: list, temperatures: list,
+          n_runs: int, telemetry: bool, command: list | None) -> dict:
+    return batch_plan.build_plan(
+        batch_id, models, scenario_ids, temperatures, n_runs, telemetry,
+        {m: temperatures_for(m, temperatures) for m in models}, command)
 
 
 def _run_all(prep: PreparedBatch, state: dict) -> None:
@@ -181,6 +200,8 @@ def _run_all(prep: PreparedBatch, state: dict) -> None:
                                   step_sink=step_sink, event_sink=event_sink)
                     record_run(rec)
                     state["recorded"] += 1
+                    # stored now, so a live view has a grade to show (CLAUDE.md 4.8)
+                    grade_and_store_run(cfg, batch_log, prep.scenarios, rec["run_id"])
                     consecutive = consecutive + 1 if rec["status"] == "invalid" else 0
                     if consecutive >= cfg["max_consecutive_invalid"]:
                         log.error("aborting batch %s: %d consecutive invalid runs",
@@ -212,6 +233,7 @@ def execute_batch(prep: PreparedBatch) -> dict:
         _remove_empty_batch(batch_log)
         raise ListenerStartError(str(exc)) from exc
     started_at = _now()
+    batch_plan.update_plan(batch_log.out_dir, pid=os.getpid(), started_at=started_at)
     state = {"recorded": 0, "aborted": False, "abort_reason": None}
     error = None
     try:
@@ -230,6 +252,8 @@ def execute_batch(prep: PreparedBatch) -> dict:
                                            if not remote_client.accepts_temperature(m)],
             "started_at": started_at, "ended_at": _now(), "aborted": state["aborted"],
             "abort_reason": state["abort_reason"]}
+    batch_plan.finalise_plan(batch_log.out_dir, meta["ended_at"], state["aborted"],
+                             state["abort_reason"])
     if error is None:
         results = write_batch_results(cfg, batch_log, prep.scenarios, meta)
         if stop_error is not None:
@@ -256,6 +280,82 @@ def run_batch(cfg: dict, models: list[str], scenario_ids: list[str], n_runs: int
         cfg, models, scenario_ids, n_runs, telemetry, batch_id, chat_fn_factory,
         temperatures=temperatures, config_path=config_path,
         scenarios_path=scenarios_path, fixtures_root=fixtures_root))
+
+
+REGRADE_STOPPED = "regraded after the batch stopped early"
+REGRADE_UNKNOWN = "regraded; planned run count unknown"
+
+
+def _distinct(values) -> list:
+    out = []
+    for v in values:
+        if v not in out:
+            out.append(v)
+    return out
+
+
+def _regrade_meta(batch_id: str, runs: list[dict], plan: dict | None) -> dict:
+    """Batch metadata for a regrade: from batch.json when there is one, otherwise
+    rebuilt from the run rows."""
+    if plan is not None:
+        base = {k: plan[k] for k in ("models", "scenario_ids", "n_runs", "temperatures",
+                                     "telemetry_enabled")}
+        if plan.get("aborted"):
+            aborted, reason = True, plan.get("abort_reason")
+        elif plan["planned_runs"] == len(runs):
+            aborted, reason = False, None
+        else:
+            aborted, reason = True, REGRADE_STOPPED
+    else:
+        base = {"models": _distinct(r["model_name"] for r in runs),
+                "scenario_ids": _distinct(r["scenario_id"] for r in runs),
+                "n_runs": max(r["repetition_index"] for r in runs) + 1,
+                "temperatures": _distinct(r["temperature"] for r in runs),
+                "telemetry_enabled": runs[0]["telemetry_enabled"]}
+        aborted, reason = True, REGRADE_UNKNOWN
+    models = base["models"]
+    return {"batch_id": batch_id, **base,
+            "hosted_models": [m for m in models
+                              if remote_client.split_model(m)[0] is not None],
+            "models_without_temperature": [m for m in models
+                                           if not remote_client.accepts_temperature(m)],
+            "started_at": (plan or {}).get("started_at") or runs[0]["started_at"],
+            "ended_at": (plan or {}).get("ended_at") or runs[-1]["ended_at"],
+            "aborted": aborted, "abort_reason": reason, "regraded_at": _now()}
+
+
+def regrade(cfg: dict, batch_id: str, scenarios: list[dict]) -> dict:
+    """Complete a batch that was logged but not fully graded (CLAUDE.md 4.8). Starts no
+    listener and calls no model. Stored result rows are kept, never overwritten."""
+    batch_log = existing_batch(cfg["db_path"], cfg["results_dir"], batch_id)
+    runs = read_runs(cfg["db_path"], batch_id)
+    if not runs:
+        raise ValueError(f"batch {batch_id!r} has no recorded runs; nothing to grade")
+    stored = read_result_rows(cfg["db_path"], batch_id)
+    files = all(os.path.isfile(os.path.join(batch_log.out_dir, n))
+                for n in ("results.json", "summary.md"))
+    if len(stored) == len(runs) and files:
+        raise ValueError(f"every run of batch {batch_id!r} already has a stored result "
+                         "and its files exist; nothing to regrade")
+    plan = batch_plan.read_plan(batch_log.out_dir)
+    meta = _regrade_meta(batch_id, runs, plan)
+    recorded = {r["run_id"] for r in runs}
+    orphans = [i for i in read_step_run_ids(batch_log.out_dir) if i not in recorded]
+    meta["orphan_run_ids"] = orphans
+    notes = [f"steps logged for run {i} but the run was never recorded (cut off "
+             "mid-run); it is in no cell" for i in orphans]
+    results = write_batch_results(cfg, batch_log, scenarios, meta, batch_notes=notes)
+    if plan is not None and not plan.get("ended_at"):
+        batch_plan.finalise_plan(batch_log.out_dir, meta["ended_at"], meta["aborted"],
+                                 meta["abort_reason"])
+    return {"batch_id": batch_id, "out_dir": batch_log.out_dir, "results": results,
+            "orphan_run_ids": orphans}
+
+
+def _print_results(out: dict) -> None:
+    print(f"summary: {os.path.join(out['out_dir'], 'summary.md')}")
+    for r in out["results"]:
+        print(f"{r['scenario_id']} {r['model_name']} rep={r['repetition_index']} {r['cell']}")
 
 
 def _csv(text: str) -> list[str]:
@@ -293,6 +393,11 @@ def _parser() -> argparse.ArgumentParser:
     p.add_argument("--batch-id", default=None)
     p.add_argument("--list-remote-models", metavar="PROVIDER",
                    help="print the model ids a provider offers (needs its key) and exit")
+    p.add_argument("--plan", action="store_true",
+                   help="print the batch plan as JSON and exit; opens no batch")
+    p.add_argument("--regrade", metavar="BATCH_ID",
+                   help="grade the runs of a logged batch that have no stored result, "
+                        "write its files and exit; starts no listener")
     p.add_argument("--allow-any-model", action="store_true",
                    help="accept a model name that is not in config.yaml")
     return p
@@ -357,6 +462,15 @@ def main(argv: list[str] | None = None) -> int:
     problems = validate(SCENARIOS_PATH, args.config)
     if problems:
         return _fail("scenarios invalid:\n  " + "\n  ".join(problems))
+    if args.regrade is not None:
+        try:
+            out = regrade(cfg, args.regrade, load_scenarios(SCENARIOS_PATH))
+        except ValueError as exc:
+            return _fail(str(exc))
+        _print_results(out)
+        for i in out["orphan_run_ids"]:
+            print(f"orphan steps (run never recorded, in no cell): {i}")
+        return 0
     all_ids = [s["id"] for s in load_scenarios(SCENARIOS_PATH)]
     scenario_ids = all_ids if args.scenarios is None else _csv(args.scenarios)
     if not scenario_ids:
@@ -385,9 +499,16 @@ def main(argv: list[str] | None = None) -> int:
     if problem:
         return _fail(problem)
     batch_id = args.batch_id or _utc_stamp()
+    given = list(sys.argv[1:] if argv is None else argv)
+    command = ["run_eval.py", *(a for a in given if a != "--plan")]
+    if args.plan:
+        print(json.dumps(_plan(batch_id, models, scenario_ids, temperatures, n_runs,
+                               telemetry, command)))
+        return 0
     try:
         prep = prepare_batch(cfg, models, scenario_ids, n_runs, telemetry, batch_id,
-                             temperatures=temperatures, config_path=args.config)
+                             temperatures=temperatures, config_path=args.config,
+                             command=command)
     except ValueError as exc:
         return _fail(str(exc))
     try:
@@ -398,9 +519,7 @@ def main(argv: list[str] | None = None) -> int:
         log.exception("batch %s failed", batch_id)
         return _fail(f"batch {batch_id} failed ({type(exc).__name__}: {exc}); "
                      f"output folder: {prep.batch_log.out_dir}")
-    print(f"summary: {os.path.join(out['out_dir'], 'summary.md')}")
-    for r in out["results"]:
-        print(f"{r['scenario_id']} {r['model_name']} rep={r['repetition_index']} {r['cell']}")
+    _print_results(out)
     if out["aborted"]:
         return _fail(f"batch {batch_id} aborted: {out['abort_reason']}")
     return 0

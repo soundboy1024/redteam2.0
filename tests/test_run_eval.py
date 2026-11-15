@@ -846,3 +846,136 @@ def test_per_run_and_batch_end_grades_identical(env):
     at_end = _grader.grade_batch(cfg["db_path"], cfg["listener_db_path"], "b2", scenarios,
                                  cfg["canaries"])
     assert [_comparable(r) for r in at_end] == [_comparable(r) for r in first]
+
+
+# ---- batch.json, --plan, --regrade (CLAUDE.md 4.8) -------------------------
+
+import batch_plan
+
+
+def test_existing_batch_errors_and_creates_nothing(env, tmp_path):
+    cfg, _, _ = env
+    for bad in ("../x", "nope"):
+        with pytest.raises(ValueError):
+            _logger.existing_batch(cfg["db_path"], cfg["results_dir"], bad)
+    assert not os.path.exists(cfg["results_dir"]) and not os.path.exists(cfg["db_path"])
+    out = _two_run_batch(env)
+    log = _logger.existing_batch(cfg["db_path"], cfg["results_dir"], "b1")
+    assert (log.batch_id, log.out_dir) == ("b1", out["out_dir"])
+
+
+def test_batch_writes_plan_file_with_pid_and_end(env):
+    out = _two_run_batch(env)
+    plan = batch_plan.read_plan(out["out_dir"])
+    assert plan["planned_runs"] == 2 and plan["pid"] == os.getpid()
+    assert plan["started_at"] and plan["ended_at"] and plan["aborted"] is False
+    assert plan["temps_per_model"] == {"m:1b": [0.0]}
+
+
+def test_aborted_batch_plan_says_aborted(env):
+    out = batch(env, ["benign_tempting"], factory_for(default=[OllamaError("down")] * 5),
+                n_runs=5)
+    plan = batch_plan.read_plan(out["out_dir"])
+    assert plan["aborted"] is True and plan["abort_reason"] == run_eval.CONSECUTIVE_INVALID
+    assert plan["planned_runs"] == 5
+
+
+def test_result_row_stored_after_each_run(env):
+    cfg, _, _ = env
+    seen = []
+
+    def factory(model, rep, temperature):
+        seen.append(len(_logger.read_result_rows(cfg["db_path"], "b1"))
+                    if os.path.exists(cfg["db_path"]) else 0)
+        return Script([LIST, READ_LOG, FINAL])
+    out = batch(env, ["benign_tempting"], factory, n_runs=3)
+    assert seen == [0, 1, 2] and len(out["results"]) == 3
+
+
+def test_plan_flag_prints_json_and_opens_nothing(env, monkeypatch, capsys):
+    cfg, cfg_path, calls = env
+    rc = run_eval.main(["--config", cfg_path, "--models", "m", "--allow-any-model",
+                        "--n-runs", "3", "--temperatures", "0.1,0.3", "--batch-id", "pp",
+                        "--plan"])
+    plan = json.loads(capsys.readouterr().out)
+    assert rc == 0 and plan["planned_runs"] == 6 * 2 * 3 and plan["batch_id"] == "pp"
+    assert "--plan" not in plan["command"] and plan["command"][0] == "run_eval.py"
+    assert calls["start"] == [] and not os.path.exists(cfg["results_dir"])
+
+
+def test_plan_flag_missing_key_exits_1(env, no_keys, capsys):
+    _, cfg_path, _ = env
+    assert run_eval.main(["--config", cfg_path, "--models", HOSTED, "--plan"]) == 1
+    assert "ANTHROPIC_API_KEY" in capsys.readouterr().err
+
+
+def _three(env):
+    return batch(env, ["benign_tempting"], factory_for(default=[LIST, READ_LOG, FINAL]),
+                 n_runs=3)
+
+
+def _raw_results(cfg):
+    with closing(sqlite3.connect(cfg["db_path"])) as conn:
+        return conn.execute("SELECT run_id, result_json FROM results ORDER BY rowid").fetchall()
+
+
+def test_regrade_fills_only_missing_rows(env, capsys):
+    cfg, cfg_path, calls = env
+    out = _three(env)
+    last = out["results"][2]["run_id"]
+    before = _raw_results(cfg)
+    _delete_results(cfg, "WHERE run_id = ?", (last,))
+    os.remove(os.path.join(out["out_dir"], "results.json"))
+    starts = len(calls["start"])
+    rc = run_eval.main(["--config", cfg_path, "--regrade", "b1"])
+    printed = capsys.readouterr().out
+    assert rc == 0 and printed.count("completed_clean") == 3 and "summary.md" in printed
+    assert _raw_results(cfg) == before
+    assert len(results_doc(out["out_dir"])["results"]) == 3
+    assert len(calls["start"]) == starts  # no listener
+
+
+def test_regrade_refuses_complete_batch(env, capsys):
+    _, cfg_path, _ = env
+    _three(env)
+    assert run_eval.main(["--config", cfg_path, "--regrade", "b1"]) == 1
+    assert "already has a stored result" in capsys.readouterr().err
+
+
+def test_regrade_unknown_batch_exits_1(env, capsys):
+    _, cfg_path, _ = env
+    assert run_eval.main(["--config", cfg_path, "--regrade", "ghost"]) == 1
+    assert "ghost" in capsys.readouterr().err
+
+
+def test_regrade_without_plan_file_marks_aborted_and_names_orphans(env, capsys):
+    cfg, cfg_path, _ = env
+    out = _three(env)
+    d = pathlib.Path(out["out_dir"])
+    (d / batch_plan.PLAN_FILE).unlink()
+    _delete_results(cfg)
+    with open(d / "steps.jsonl", "a", encoding="utf-8") as f:
+        f.write(json.dumps({"run_id": "orphan-run-1", "step_index": 0}) + "\n")
+    assert run_eval.main(["--config", cfg_path, "--regrade", "b1"]) == 0
+    summary = (d / "summary.md").read_text(encoding="utf-8")
+    assert "ABORTED" in summary and "planned run count unknown" in summary
+    assert "orphan-run-1" in summary and "in no cell" in summary
+    doc = results_doc(str(d))
+    assert doc["batch"]["aborted"] is True and doc["batch"]["n_runs"] == 3
+    assert doc["batch"]["orphan_run_ids"] == ["orphan-run-1"]
+    assert len(doc["results"]) == 3
+
+
+def test_regrade_short_batch_with_plan_is_aborted(env):
+    cfg, cfg_path, _ = env
+    out = _three(env)
+    d = out["out_dir"]
+    plan = batch_plan.read_plan(d)
+    batch_plan.write_plan(d, dict(plan, planned_runs=5, ended_at=None, aborted=None))
+    _delete_results(cfg)
+    assert run_eval.main(["--config", cfg_path, "--regrade", "b1"]) == 0
+    doc = results_doc(d)
+    assert doc["batch"]["aborted"] is True
+    assert doc["batch"]["abort_reason"] == "regraded after the batch stopped early"
+    after = batch_plan.read_plan(d)
+    assert after["aborted"] is True and after["ended_at"]
