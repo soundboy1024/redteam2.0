@@ -424,7 +424,7 @@ def test_grading_failure_on_abort_path_is_logged_and_original_raised(env, monkey
 
     def broken(*a, **k):
         raise RuntimeError("grader broke")
-    monkeypatch.setattr(batch_results, "grade_batch", broken)
+    monkeypatch.setattr(batch_results, "write_results_json", broken)
     scripts = [[READ_LOG, FINAL], [KeyboardInterrupt()]]
     with caplog.at_level(logging.ERROR, logger="run_eval"):
         with pytest.raises(KeyboardInterrupt):
@@ -751,3 +751,98 @@ def test_default_factory_rejects_malformed_key_without_leaking(env, monkeypatch,
         run_eval._default_chat_fn_factory(cfg, False)(HOSTED, 0, None)
     assert "ANTHROPIC_API_KEY" in str(e.value)
     assert bad not in str(e.value) or bad == ""
+
+
+# ---- per-run grading and stored rows (CLAUDE.md 4.8) -----------------------
+
+from telemetry import grader as _grader
+from telemetry import logger as _logger
+
+
+def _two_run_batch(env, batch_id="b1"):
+    return batch(env, ["benign_tempting", "indirect_injection_log"],
+                 factory_for([[LIST, READ_LOG, FINAL], [READ_LOG, READ_ENV, POST_ENV, FINAL]]),
+                 batch_id=batch_id)
+
+
+def _comparable(row):
+    return {k: v for k, v in row.items() if k not in ("run_id", "batch_id")}
+
+
+def test_grade_logged_run_equals_grade_batch_row(env):
+    cfg, _, _ = env
+    _two_run_batch(env)
+    scenarios = load_scenarios(run_eval.SCENARIOS_PATH)
+    by_id = {s["id"]: s for s in scenarios}
+    whole = _grader.grade_batch(cfg["db_path"], cfg["listener_db_path"], "b1", scenarios,
+                                cfg["canaries"])
+    single = [_grader.grade_logged_run(cfg["db_path"], cfg["listener_db_path"], run, by_id,
+                                       cfg["canaries"])
+              for run in _logger.read_runs(cfg["db_path"], "b1")]
+    assert single == whole and len(whole) == 2
+
+
+def test_read_result_rows_round_trip(env):
+    cfg, _, _ = env
+    out = _two_run_batch(env)
+    rows = _logger.read_result_rows(cfg["db_path"], "b1")
+    assert rows == json.loads(json.dumps(out["results"]))
+    assert "attempted_calls" in rows[0]
+
+
+def test_read_step_run_ids_order_and_bad_line(env, tmp_path):
+    out = _two_run_batch(env)
+    ids = _logger.read_step_run_ids(out["out_dir"])
+    assert ids == [r["run_id"] for r in out["results"]]
+    bad = tmp_path / "bad"
+    bad.mkdir()
+    (bad / "steps.jsonl").write_text('{"run_id": "a"}\nnot json\n', encoding="utf-8")
+    with pytest.raises(ValueError, match="line 2"):
+        _logger.read_step_run_ids(str(bad))
+
+
+def _delete_results(cfg, where="", params=()):
+    with closing(sqlite3.connect(cfg["db_path"])) as conn, conn:
+        conn.execute(f"DELETE FROM results {where}", params)
+
+
+def test_grade_and_store_run_stores_one_row_and_twice_raises(env):
+    cfg, _, _ = env
+    out = _two_run_batch(env)
+    scenarios = load_scenarios(run_eval.SCENARIOS_PATH)
+    log = _logger.BatchLog("b1", cfg["db_path"], out["out_dir"])
+    first = out["results"][0]
+    _delete_results(cfg, "WHERE run_id = ?", (first["run_id"],))
+    row = batch_results.grade_and_store_run(cfg, log, scenarios, first["run_id"])
+    assert row == first
+    assert len(_logger.read_result_rows(cfg["db_path"], "b1")) == 2
+    with pytest.raises(batch_results.LogWriteError):
+        batch_results.grade_and_store_run(cfg, log, scenarios, first["run_id"])
+
+
+def test_write_batch_results_keeps_stored_rows(env):
+    cfg, _, _ = env
+    out = _two_run_batch(env)
+    a, b = out["results"]
+    scenarios = load_scenarios(run_eval.SCENARIOS_PATH)
+    log = _logger.BatchLog("b1", cfg["db_path"], out["out_dir"])
+    _delete_results(cfg, "WHERE run_id = ?", (b["run_id"],))
+    with closing(sqlite3.connect(cfg["db_path"])) as conn, conn:  # A's log changes after grading
+        conn.execute("UPDATE runs SET final_response = 'changed' WHERE run_id = ?",
+                     (a["run_id"],))
+    meta = results_doc(out["out_dir"])["batch"]
+    merged = batch_results.write_batch_results(cfg, log, scenarios, meta)
+    assert merged == json.loads(json.dumps([a, b]))
+    assert results_doc(out["out_dir"])["results"] == merged
+    assert len(_logger.read_result_rows(cfg["db_path"], "b1")) == 2
+
+
+def test_per_run_and_batch_end_grades_identical(env):
+    cfg, _, _ = env
+    first = _two_run_batch(env, "b1")["results"]
+    _two_run_batch(env, "b2")
+    scenarios = load_scenarios(run_eval.SCENARIOS_PATH)
+    _delete_results(cfg, "WHERE batch_id = 'b2'")
+    at_end = _grader.grade_batch(cfg["db_path"], cfg["listener_db_path"], "b2", scenarios,
+                                 cfg["canaries"])
+    assert [_comparable(r) for r in at_end] == [_comparable(r) for r in first]

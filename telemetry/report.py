@@ -208,7 +208,8 @@ def _fired(result: dict) -> str:
 
 
 def write_summary_md(out_dir: str, batch_meta: dict, results: list[dict],
-                     trajectory_hashes: dict[str, str] | None = None) -> str:
+                     trajectory_hashes: dict[str, str] | None = None,
+                     batch_notes: list[str] | None = None) -> str:
     matrix = build_matrix(results, trajectory_hashes)
     lines: list[str] = []
     if batch_meta["aborted"]:
@@ -279,7 +280,8 @@ def write_summary_md(out_dir: str, batch_meta: dict, results: list[dict],
     lines += [f"- {_inline(r['run_id'])}: {_inline('; '.join(map(str, r['notes'])))}"
               for r in noted]
     lines += [f"- No runs recorded for model {_inline(m)}." for m in missing]
-    if not noted and not missing:
+    lines += [f"- {_inline(n)}" for n in (batch_notes or [])]
+    if not noted and not missing and not batch_notes:
         lines.append("None")
     lines += ["", "## Limitations", "", LIMITATION_NOTE, "", COMPLETION_NOTE, "",
               EXECUTED_NOTE, "", FAILED_NOTE, ""]

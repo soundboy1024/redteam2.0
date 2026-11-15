@@ -316,6 +316,31 @@ def read_results(db_path: str, batch_id: str) -> list[dict]:
     return [_decode(r, RESULT_COLUMNS) for r in rows]
 
 
+def read_result_rows(db_path: str, batch_id: str) -> list[dict]:
+    """The stored result rows of a batch, each as the whole row the grader produced."""
+    rows = _fetch(db_path, "SELECT result_json FROM results WHERE batch_id = ? "
+                           "ORDER BY rowid", (batch_id,))
+    return [json.loads(r["result_json"]) for r in rows]
+
+
+def read_step_run_ids(out_dir: str) -> list[str]:
+    """Distinct run ids in a batch folder's steps.jsonl, in first-seen order."""
+    path = os.path.join(out_dir, "steps.jsonl")
+    seen: list[str] = []
+    with open(path, encoding="utf-8") as f:
+        for n, line in enumerate(f, 1):
+            if not line.strip():
+                continue
+            try:
+                run_id = json.loads(line)["run_id"]
+            except (ValueError, KeyError, TypeError) as exc:
+                raise ValueError(f"{path} line {n}: not a step row "
+                                 f"({type(exc).__name__}: {exc})") from exc
+            if run_id not in seen:
+                seen.append(run_id)
+    return seen
+
+
 def read_run_inputs(db_path: str, run_id: str) -> dict | None:
     rows = _fetch(db_path, "SELECT * FROM run_inputs WHERE run_id = ?", (run_id,))
     if not rows:

@@ -322,17 +322,21 @@ def grade_run(run: dict, steps: list[dict], tool_events: list[dict],
     }
 
 
+def grade_logged_run(db_path: str, listener_db_path: str, run: dict,
+                     scenarios_by_id: dict, canaries: list[dict]) -> dict:
+    """Grade one recorded run from its own log rows."""
+    if run["scenario_id"] not in scenarios_by_id:
+        raise KeyError(f"run {run['run_id']!r}: scenario {run['scenario_id']!r} "
+                       "not in scenarios")
+    return grade_run(
+        run, read_steps(db_path, run["run_id"]),
+        read_tool_events(db_path, run["run_id"]),
+        fetch_events(listener_db_path, run["run_id"]),
+        scenarios_by_id[run["scenario_id"]], canaries)
+
+
 def grade_batch(db_path: str, listener_db_path: str, batch_id: str,
                 scenarios: list[dict], canaries: list[dict]) -> list[dict]:
     by_id = {s["id"]: s for s in scenarios}
-    results = []
-    for run in read_runs(db_path, batch_id):
-        if run["scenario_id"] not in by_id:
-            raise KeyError(f"run {run['run_id']!r}: scenario {run['scenario_id']!r} "
-                           "not in scenarios")
-        results.append(grade_run(
-            run, read_steps(db_path, run["run_id"]),
-            read_tool_events(db_path, run["run_id"]),
-            fetch_events(listener_db_path, run["run_id"]),
-            by_id[run["scenario_id"]], canaries))
-    return results
+    return [grade_logged_run(db_path, listener_db_path, run, by_id, canaries)
+            for run in read_runs(db_path, batch_id)]
