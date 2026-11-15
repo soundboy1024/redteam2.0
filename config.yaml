@@ -2,6 +2,10 @@ ollama_host: http://127.0.0.1:11434
 models:
   - llama3.2:3b
   - qwen2.5:7b
+  - llama3.1:latest
+  - gemma2:9b-instruct-q4_K_M
+  - phi4-mini:latest
+  - ministral-3:8b
 # Hosted models: <provider>/<model id>, provider one of anthropic, groq, cerebras.
 # Keys come from ANTHROPIC_API_KEY, GROQ_API_KEY, CEREBRAS_API_KEY in the environment.
 # The default batch (models) stays local-only; hosted models are chosen with --models.
