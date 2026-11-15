@@ -23,6 +23,12 @@ Gates are scripts under `gates/`. Each one starts the decoy listener itself, exe
    .venv\Scripts\python.exe gates\gateN.py
    ```
 
+   Gate 4 is different: it starts no listener and calls no model. It reads the stored results of the Gate 4 batch (two models, all six scenarios, n_runs 3, started from the control panel's Run page) and needs its id:
+
+   ```
+   .venv\Scripts\python.exe gates\gate4.py --batch-id <gate4 batch id>
+   ```
+
 4. Report the last line (`GATE N: PASS` or `GATE N: FAIL <reason>`), the exit code, and the evidence rows the gate printed.
 5. When running a later gate, re-run every earlier gate too. A later change must not break an earlier gate.
 
