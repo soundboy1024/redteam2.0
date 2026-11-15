@@ -1,0 +1,10 @@
+[theme]
+base = "dark"
+
+[server]
+port = 8503
+address = "127.0.0.1"
+headless = true
+
+[browser]
+gatherUsageStats = false
