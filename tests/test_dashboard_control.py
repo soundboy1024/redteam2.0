@@ -69,19 +69,40 @@ def test_key_names_match_harness():
         assert control.provider_of(model) == remote_client.split_model(model)[0]
 
 
-@pytest.mark.parametrize("plan,port,files,expected", [
-    (None, False, True, "finished"),
-    (None, False, False, "unknown"),
-    ({"pid": 5, "ended_at": None}, True, False, "running"),
-    ({"pid": 5, "ended_at": None}, False, False, "stopped_without_results"),
-    ({"pid": None, "ended_at": None}, True, False, "stopped_without_results"),
-    ({"pid": 5, "ended_at": "t", "aborted": False}, False, True, "finished"),
-    ({"pid": 5, "ended_at": "t", "aborted": True}, False, True, "aborted"),
-    ({"pid": 5, "ended_at": "t", "aborted": False}, False, False, "stopped_without_results"),
+RUN = {"pid": 5, "pid_create_time": 111, "ended_at": None}
+OLD = {"pid": 5, "ended_at": None}   # written before the creation time was recorded
+
+
+@pytest.mark.parametrize("plan,alive,verified,port,files,expected", [
+    (None, False, False, False, True, "finished"),
+    (None, False, False, True, False, "unknown"),
+    ({"pid": None, "ended_at": None}, False, False, False, False, "starting"),
+    (RUN, True, True, True, False, "running"),
+    (RUN, True, True, False, False, "running"),
+    # a dead batch never looks alive because something else holds the port
+    (RUN, False, True, True, False, "stopped_without_results"),
+    (RUN, False, False, True, False, "stopped_without_results"),
+    (OLD, True, False, True, False, "running"),
+    (OLD, True, False, False, False, "stopped_without_results"),
+    (dict(RUN, ended_at="t", aborted=False), True, True, False, False, "finishing"),
+    (dict(RUN, ended_at="t", aborted=False), False, False, False, True, "finished"),
+    (dict(RUN, ended_at="t", aborted=True), False, False, False, True, "aborted"),
+    (dict(RUN, ended_at="t", aborted=False), False, False, False, False,
+     "stopped_without_results"),
 ])
-def test_batch_state_table(plan, port, files, expected):
-    assert control.batch_state(plan, port, files) == expected
+def test_batch_state_table(plan, alive, verified, port, files, expected):
+    assert control.batch_state(plan, alive, verified, port, files) == expected
     assert expected in control.STATES
+
+
+def test_process_alive_needs_matching_creation_time(monkeypatch):
+    monkeypatch.setattr(control.batch_plan, "process_create_time",
+                        lambda pid: {5: 111}.get(pid))
+    assert control.process_alive({"pid": 5, "pid_create_time": 111}) == (True, True)
+    assert control.process_alive({"pid": 5, "pid_create_time": 999}) == (False, True)  # reused
+    assert control.process_alive({"pid": 5}) == (True, False)
+    assert control.process_alive({"pid": 6, "pid_create_time": 111}) == (False, False)
+    assert control.process_alive(None) == (False, False)
 
 
 def _no_popen(monkeypatch):
@@ -131,12 +152,37 @@ def test_stop_kills_only_plan_pid_then_regrades(monkeypatch):
     run, calls = _fake_run(0, stdout="ok")
     monkeypatch.setattr(control.subprocess, "run", run)
     monkeypatch.setattr(control, "port_open", lambda host, port: False)
+    monkeypatch.setattr(control, "process_alive", lambda plan: (True, True))
     out = control.stop_batch({"batch_id": "b9", "pid": 4321, "ended_at": None}, "C:/x",
                              "py.exe", "127.0.0.1", 8999, "cfg.yaml")
     assert [c[0] for c in calls] == [
         ["taskkill", "/PID", "4321", "/T", "/F"],
         ["py.exe", "run_eval.py", "--config", "cfg.yaml", "--regrade", "b9"]]
     assert out["killed"] is True and out["port_closed"] is True and out["regrade_exit"] == 0
+
+
+@pytest.mark.parametrize("alive,needle", [((False, False), "no longer running"),
+                                          ((False, True), "no longer running"),
+                                          ((True, False), "cannot be stopped safely")])
+def test_stop_never_kills_a_dead_or_unidentified_process(monkeypatch, alive, needle):
+    run, calls = _fake_run()
+    monkeypatch.setattr(control.subprocess, "run", run)
+    monkeypatch.setattr(control, "process_alive", lambda plan: alive)
+    with pytest.raises(ValueError, match=needle):
+        control.stop_batch({"batch_id": "b", "pid": 77, "ended_at": None}, ".", "py",
+                           "127.0.0.1", 1)
+    assert calls == []
+
+
+def test_stop_does_not_regrade_when_the_kill_failed(monkeypatch):
+    run, calls = _fake_run(1, stderr="Access is denied.")
+    monkeypatch.setattr(control.subprocess, "run", run)
+    monkeypatch.setattr(control, "port_open", lambda host, port: True)
+    monkeypatch.setattr(control, "process_alive", lambda plan: (True, True))
+    out = control.stop_batch({"batch_id": "b", "pid": 77, "ended_at": None}, ".", "py",
+                             "127.0.0.1", 1)
+    assert len(calls) == 1 and out["killed"] is False and out["regrade_exit"] is None
+    assert "Access is denied" in out["regrade_output"]
 
 
 def test_rules_flag_dashboard_importing_harness(tmp_path):

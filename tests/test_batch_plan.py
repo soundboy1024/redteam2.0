@@ -47,3 +47,44 @@ def test_update_plan_unknown_field_raises(tmp_path):
     batch_plan.write_plan(str(tmp_path), _plan())
     with pytest.raises(KeyError):
         batch_plan.update_plan(str(tmp_path), nonsense=1)
+
+
+def test_write_plan_retries_when_reader_holds_the_file(tmp_path, monkeypatch):
+    real, calls = batch_plan.os.replace, []
+
+    def flaky(src, dst):
+        calls.append(1)
+        if len(calls) < 3:
+            raise PermissionError("file in use by another process")
+        return real(src, dst)
+    monkeypatch.setattr(batch_plan.os, "replace", flaky)
+    monkeypatch.setattr(batch_plan.time, "sleep", lambda s: None)
+    batch_plan.write_plan(str(tmp_path), _plan())
+    assert len(calls) == 3 and batch_plan.read_plan(str(tmp_path))["batch_id"] == "b1"
+
+
+def test_write_plan_gives_up_loudly_after_retries(tmp_path, monkeypatch):
+    def locked(src, dst):
+        raise PermissionError("file in use")
+    monkeypatch.setattr(batch_plan.os, "replace", locked)
+    monkeypatch.setattr(batch_plan.time, "sleep", lambda s: None)
+    with pytest.raises(PermissionError):
+        batch_plan.write_plan(str(tmp_path), _plan())
+    assert list(tmp_path.iterdir()) == []  # no temp file left behind
+
+
+def test_process_create_time_identifies_this_process():
+    import os
+    import subprocess
+    import sys
+    mine = batch_plan.process_create_time(os.getpid())
+    assert isinstance(mine, int) and mine == batch_plan.process_create_time(os.getpid())
+    child = subprocess.Popen([sys.executable, "-c", "pass"])
+    child.wait()
+    assert batch_plan.process_create_time(child.pid) is None  # exited
+    assert batch_plan.process_create_time(0) is None
+    assert batch_plan.process_create_time(None) is None
+
+
+def test_plan_has_create_time_field():
+    assert _plan()["pid_create_time"] is None and "pid_create_time" in batch_plan.FIELDS

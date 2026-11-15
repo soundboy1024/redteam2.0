@@ -10,11 +10,15 @@ import socket
 import subprocess
 import time
 
+import batch_plan
+
 log = logging.getLogger(__name__)
 
 KEY_ENV = {"anthropic": "ANTHROPIC_API_KEY", "groq": "GROQ_API_KEY",
            "cerebras": "CEREBRAS_API_KEY"}
-STATES = ("running", "finished", "aborted", "stopped_without_results", "unknown")
+STATES = ("starting", "running", "finishing", "finished", "aborted",
+          "stopped_without_results", "unknown")
+LIVE_STATES = ("starting", "running", "finishing")
 PLAN_TIMEOUT_S = 30
 PORT_CLOSE_WAIT_S = 15
 
@@ -71,14 +75,38 @@ def port_open(host: str, port: int) -> bool:
         return s.connect_ex((host, port)) == 0
 
 
-def batch_state(plan: dict | None, port_is_open: bool, has_results_files: bool) -> str:
+def process_alive(plan: dict | None) -> tuple[bool, bool]:
+    """(alive, identity_verified) for the batch process a plan records.
+
+    A pid alone can be reused by an unrelated process, so the plan also records the
+    process creation time. Verified means the live process has both. A plan written
+    before the creation time was recorded can be alive but is never verified."""
+    if not plan:
+        return False, False
+    created = batch_plan.process_create_time(plan.get("pid"))
+    if created is None:
+        return False, False
+    recorded = plan.get("pid_create_time")
+    if recorded is None:
+        return True, False
+    return created == recorded, True
+
+
+def batch_state(plan: dict | None, alive: bool, verified: bool, port_is_open: bool,
+                has_results_files: bool) -> str:
+    """One of STATES. A batch is live only while its own process is alive; a port held
+    by something else never makes a dead batch look alive."""
     if plan is None:
         return "finished" if has_results_files else "unknown"
     if plan.get("ended_at"):
+        if alive and verified:
+            return "finishing"  # still writing its results
         if not has_results_files:
             return "stopped_without_results"
         return "aborted" if plan.get("aborted") else "finished"
-    if plan.get("pid") and port_is_open:
+    if not plan.get("pid"):
+        return "starting"
+    if alive and (verified or port_is_open):
         return "running"
     return "stopped_without_results"
 
@@ -109,10 +137,23 @@ def stop_batch(plan: dict, cwd: str, python_exe: str, host: str, port: int,
         raise ValueError(f"batch {plan.get('batch_id')!r} has no process id to stop")
     if plan.get("ended_at"):
         raise ValueError(f"batch {plan.get('batch_id')!r} already ended")
+    alive, verified = process_alive(plan)
+    if not alive:
+        raise ValueError(f"the process of batch {plan.get('batch_id')!r} is no longer "
+                         "running; nothing to stop (use Regrade)")
+    if not verified:
+        raise ValueError(f"batch {plan.get('batch_id')!r} did not record which process it "
+                         "is, so it cannot be stopped safely from here; stop it where it "
+                         "was started")
     kill = subprocess.run(["taskkill", "/PID", str(pid), "/T", "/F"], capture_output=True,
                           text=True)
     log.warning("stop batch %s: taskkill pid=%s exit=%s %s", plan.get("batch_id"), pid,
                 kill.returncode, (kill.stdout + kill.stderr).strip())
+    if kill.returncode != 0 and process_alive(plan)[0]:
+        return {"killed": False, "port_closed": not port_open(host, port),
+                "regrade_exit": None,
+                "regrade_output": "the batch process could not be stopped, so it was not "
+                                  "regraded: " + (kill.stdout + kill.stderr).strip()[-500:]}
     deadline = time.monotonic() + PORT_CLOSE_WAIT_S
     while port_open(host, port) and time.monotonic() < deadline:
         time.sleep(0.5)

@@ -9,6 +9,7 @@ Launch: run_dashboard.bat   (port 8503)
 import json
 import os
 import pathlib
+import re
 import sys
 from datetime import datetime, timezone
 
@@ -28,7 +29,10 @@ CELL_LABELS = {"completed_clean": "Completed and clean",
                "completed_compromised": "Completed and compromised",
                "failed_clean": "Failed and clean",
                "failed_compromised": "Failed and compromised"}
-STATE_TEXT = {"running": "RUNNING", "finished": "finished", "aborted": "ABORTED",
+BATCH_ID_RE = re.compile(r"[A-Za-z0-9_-]{1,64}")
+STATE_TEXT = {"starting": "STARTING", "running": "RUNNING",
+              "finishing": "FINISHING (writing results)",
+              "finished": "finished", "aborted": "ABORTED",
               "stopped_without_results": "STOPPED WITHOUT RESULTS",
               "unknown": "unknown (no plan file, no results)"}
 
@@ -77,15 +81,28 @@ def _parse_temperatures(text: str) -> tuple[list[float], str | None]:
     return values, None
 
 
-def _batch_state(s: dict, batch: dict, port_is_open: bool) -> str:
-    plan, _ = data.read_plan_safe(s["results_dir"], batch["batch_id"])
-    return control.batch_state(plan, port_is_open, batch["has_result_files"])
+def _state_of(plan: dict | None, has_files: bool, port_is_open: bool) -> tuple[str, bool]:
+    """(state, identity_verified) of a batch from its plan and its own process."""
+    alive, verified = control.process_alive(plan)
+    return control.batch_state(plan, alive, verified, port_is_open, has_files), verified
 
 
-def _running_batch(s: dict, batches: list[dict], port_is_open: bool) -> str | None:
+def _live_batch(s: dict, batches: list[dict], port_is_open: bool):
+    """(batch_id, state, plan, verified) of the batch that is alive now, or None."""
     for b in batches:
-        if _batch_state(s, b, port_is_open) == "running":
-            return b["batch_id"]
+        plan, _ = data.read_plan_safe(s["results_dir"], b["batch_id"])
+        state, verified = _state_of(plan, b["has_result_files"], port_is_open)
+        if state in control.LIVE_STATES:
+            return b["batch_id"], state, plan, verified
+    return None
+
+
+def _batch_name_problem(batch_id: str, existing: list[str], results_dir: str) -> str | None:
+    if not BATCH_ID_RE.fullmatch(batch_id):
+        return ("the batch name may only use letters, digits, - and _ (1 to 64 "
+                "characters)")
+    if batch_id in existing or os.path.exists(os.path.join(results_dir, batch_id)):
+        return f"a batch named {batch_id} already exists; pick a new name"
     return None
 
 
@@ -126,13 +143,17 @@ def page_run(s: dict) -> None:
 
     batches = data.list_batches(s["db"], s["results_dir"])
     port_is_open = control.port_open(s["host"], s["port"])
-    running = _running_batch(s, batches, port_is_open)
+    live = _live_batch(s, batches, port_is_open)
+    running = live[0] if live else None
 
     problem = temp_problem
     if not models:
         problem = "pick at least one model"
     elif not scenario_ids:
         problem = "pick at least one scenario"
+    elif problem is None:
+        problem = _batch_name_problem(batch_id.strip(), [b["batch_id"] for b in batches],
+                                      s["results_dir"])
     plan = None
     command = control.build_command(sys.executable, models, scenario_ids, temperatures,
                                     int(n_runs), batch_id.strip(), s["config_path"])
@@ -147,7 +168,7 @@ def page_run(s: dict) -> None:
 
     blocker = None
     if running:
-        blocker = f"batch {running} is running; one batch at a time"
+        blocker = f"batch {running} is {live[1]}; one batch at a time"
     elif port_is_open:
         blocker = (f"port {s['port']} is in use by something that is not a batch started "
                    "here (a gate or a command-line batch); wait for it to finish")
@@ -164,17 +185,22 @@ def page_run(s: dict) -> None:
             st.session_state["watch"] = batch_id.strip()
             del st.session_state["default_batch"]
             st.success(f"Started {batch_id.strip()}. Console output: {console}")
+    stoppable = bool(live and live[1] == "running" and live[3])
     confirm = b3.checkbox("I want to stop the running batch", key="confirm_stop",
-                          disabled=running is None)
-    if b2.button("Stop", disabled=not (running and confirm), key="stop"):
-        plan_running, _ = data.read_plan_safe(s["results_dir"], running)
+                          disabled=not stoppable)
+    if live and live[1] == "running" and not live[3]:
+        st.caption(f"Stop is off for {running}: it did not record which process it is "
+                   "(it was started before that was recorded, or from a script), so it "
+                   "can only be stopped where it was started.")
+    if b2.button("Stop", disabled=not (stoppable and confirm), key="stop"):
         try:
-            out = control.stop_batch(plan_running, str(ROOT), sys.executable, s["host"],
+            out = control.stop_batch(live[2], str(ROOT), sys.executable, s["host"],
                                      s["port"], s["config_path"])
         except ValueError as exc:
-            st.error(f"Not stopped: {exc}")
+            st.error("Not stopped:")
+            st.text(str(exc))
         else:
-            st.warning(f"Stopped {running}. Process killed: {out['killed']}. "
+            st.warning(f"Stop requested for {running}. Process killed: {out['killed']}. "
                        f"Regrade exit code: {out['regrade_exit']}.")
             st.code(out["regrade_output"], language=None)
 
@@ -193,17 +219,19 @@ def page_run(s: dict) -> None:
 def progress_block(s: dict, batch_id: str) -> None:
     p = data.batch_progress(s["db"], s["listener_db"], s["results_dir"], batch_id)
     port_is_open = control.port_open(s["host"], s["port"])
-    state = control.batch_state(p["plan"], port_is_open, p["has_result_files"])
+    state, _ = _state_of(p["plan"], p["has_result_files"], port_is_open)
     planned = p["planned_runs"]
     st.subheader(f"{batch_id}: {STATE_TEXT[state]}")
     if p["plan_problem"]:
-        st.error(f"batch.json could not be read: {p['plan_problem']}")
+        st.error("batch.json could not be read:")
+        st.text(p["plan_problem"])
     st.write(f"**{p['recorded_runs']} / {planned if planned is not None else 'unknown'}** "
              "runs recorded")
     if planned:
         st.progress(min(1.0, p["recorded_runs"] / planned))
     if p["plan"] and p["plan"].get("abort_reason"):
-        st.error(f"Abort reason: {p['plan']['abort_reason']}")
+        st.error("This batch aborted. Reason:")
+        st.text(str(p["plan"]["abort_reason"]))
     if state == "stopped_without_results":
         st.error("This batch stopped without writing results. Nothing about it is a "
                  "result until it is regraded.")
@@ -212,7 +240,7 @@ def progress_block(s: dict, batch_id: str) -> None:
             st.write(f"Regrade exit code: {out['regrade_exit']}")
             st.code(out["regrade_output"], language=None)
     cur = p["current"]
-    if cur and state == "running":
+    if cur and state in ("running", "starting"):
         st.write(f"**Now:** {cur['scenario_id']} | {cur['model_name']} | "
                  f"temperature {_temp_text(cur['temperature'])} | "
                  f"repetition {cur['repetition_index']}")
@@ -221,7 +249,7 @@ def progress_block(s: dict, batch_id: str) -> None:
             "step": x["step_index"], "state": x["agent_state"], "tool": x["tool_name"],
             "arguments": x["tool_args_json"], "parse reason": x["parse_reason"]}
             for x in cur["last_steps"]]), hide_index=True, width="stretch")
-    elif p["unrecorded_run_ids"] and state != "running":
+    elif p["unrecorded_run_ids"] and state not in control.LIVE_STATES:
         st.caption(f"{len(p['unrecorded_run_ids'])} run(s) were cut off mid-run and never "
                    "recorded. They are in no cell.")
     st.caption("Finished runs, newest first. Results are the grader's stored rows.")
@@ -262,14 +290,29 @@ def page_results(s: dict) -> None:
         _limitations()
         return
     m = data.matrix(s["db"], s["results_dir"], chosen)
+    port_is_open = control.port_open(s["host"], s["port"])
+    by_id = {b["batch_id"]: b for b in batches}
+    for i in m["included"]:
+        plan, _ = data.read_plan_safe(s["results_dir"], i["batch_id"])
+        i["state"] = _state_of(plan, by_id[i["batch_id"]]["has_result_files"],
+                               port_is_open)[0]
+        short = i["planned_runs"] is not None and i["stored_results"] < i["planned_runs"]
+        i["incomplete"] = (i["aborted"] is True or short
+                           or i["state"] not in ("finished", "aborted")
+                           or (i["planned_runs"] is not None and i["aborted"] is None))
     st.caption("Included batches")
     st.dataframe(pd.DataFrame([{
         "batch": i["batch_id"], "stored results": i["stored_results"],
         "planned runs": "unknown" if i["planned_runs"] is None else i["planned_runs"],
-        "aborted": {True: "YES, incomplete", False: "no", None: "unknown"}[i["aborted"]]}
+        "state": STATE_TEXT[i["state"]],
+        "aborted": {True: "YES", False: "no", None: "unknown"}[i["aborted"]],
+        "complete": "NO, incomplete" if i["incomplete"] else "yes"}
         for i in m["included"]]), hide_index=True, width="stretch")
-    if any(i["aborted"] for i in m["included"]):
-        st.warning("At least one included batch was aborted, so the matrix is incomplete.")
+    incomplete = [i["batch_id"] for i in m["included"] if i["incomplete"]]
+    if incomplete:
+        st.warning("The matrix below is INCOMPLETE. These included batches are still "
+                   "running, were aborted or stopped, or have fewer stored results than "
+                   "planned: " + ", ".join(incomplete))
     t = m["totals"]
     st.write(f"**{t['total']} runs**: {t['valid']} valid, {t['invalid']} invalid (invalid "
              f"runs are in no cell). {t['runs_with_parse_failures']} runs had parse "
@@ -338,9 +381,10 @@ def page_inspect(s: dict) -> None:
         c2.metric("Tripwires fired", ", ".join(d["tripwires_fired"]) or "none")
         c3.metric("Canaries leaked", ", ".join(result.get("canary_ids", [])) or "none")
         if not result["valid"]:
-            st.error(f"Invalid run: {result.get('invalid_reason')}")
+            st.error("Invalid run (in no cell). Reason:")
+            st.text(str(result.get("invalid_reason")))
         for note in result.get("notes", []):
-            st.caption(f"Grader note: {note}")
+            st.text(f"Grader note: {note}")
     if d["inputs"]:
         st.caption("Task given to the agent")
         st.code(d["inputs"]["user_prompt"], language=None, wrap_lines=True)
@@ -349,7 +393,9 @@ def page_inspect(s: dict) -> None:
         st.subheader("Attempted calls that were never executed")
         st.caption("From replies rejected as parse failures. Not part of the result above.")
         calls = d["attempted_calls"]
-        if calls == data.NOT_RECORDED:
+        if result is None:
+            st.write("not recorded (this run has not been graded)")
+        elif calls == data.NOT_RECORDED:
             st.write("not recorded (this result was written before attempted calls were "
                      "tracked)")
         elif not calls:
@@ -389,9 +435,10 @@ def page_inspect(s: dict) -> None:
         title = (f"step {x['step_index']} | {x['agent_state']} | "
                  f"{x['tool_name'] or 'no tool'}{mark}")
         with st.expander(title):
-            st.write(f"parse_reason: {x['parse_reason'] or 'none'} | done_reason: "
-                     f"{x['done_reason'] or 'none'} | tokens: {x['token_count']} | "
-                     f"prompt tokens: {x['prompt_token_count']}")
+            # parse_reason quotes model text, so it is shown as plain text
+            st.text(f"parse_reason: {x['parse_reason'] or 'none'}\n"
+                    f"done_reason: {x['done_reason'] or 'none'} | tokens: "
+                    f"{x['token_count']} | prompt tokens: {x['prompt_token_count']}")
             st.caption("Reply")
             st.code(x["raw_response"] or "(none)", language=None, wrap_lines=True)
             st.caption("Tool result returned to the model (full)")

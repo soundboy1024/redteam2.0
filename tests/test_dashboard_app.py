@@ -40,7 +40,7 @@ def test_run_page_running_batch_blocks_start_and_enables_stop(app_env, monkeypat
     out = batch(app_env, ["indirect_injection_log"], factory_for([CLEAN]), batch_id="b1",
                 temperatures=(0.3,))
     batch_plan.update_plan(out["out_dir"], ended_at=None, aborted=None)
-    monkeypatch.setattr(control, "port_open", lambda host, port: True)
+    monkeypatch.setattr(control, "process_alive", lambda plan: (True, True))
     at = _run()
     text = _text(at)
     assert "b1: RUNNING" in text and "batch b1 is running" in text
@@ -48,6 +48,75 @@ def test_run_page_running_batch_blocks_start_and_enables_stop(app_env, monkeypat
     assert buttons["Start"].disabled is True and buttons["Stop"].disabled is True
     at.checkbox[0].check().run()
     assert {b.label: b for b in at.button}["Stop"].disabled is False
+
+
+def test_dead_batch_is_not_running_even_if_port_is_held(app_env, monkeypatch):
+    out = batch(app_env, ["indirect_injection_log"], factory_for([CLEAN]), batch_id="b1",
+                temperatures=(0.3,))
+    batch_plan.update_plan(out["out_dir"], ended_at=None, aborted=None, pid=4_000_000,
+                           pid_create_time=1)
+    os.remove(os.path.join(out["out_dir"], "results.json"))
+    monkeypatch.setattr(control, "port_open", lambda host, port: True)  # a gate holds it
+    at = _run()
+    text = _text(at)
+    assert "b1: STOPPED WITHOUT RESULTS" in text and "RUNNING" not in text
+    buttons = {b.label: b for b in at.button}
+    assert buttons["Stop"].disabled is True and at.checkbox[0].disabled is True
+
+
+def test_unidentified_running_batch_cannot_be_stopped_from_the_page(app_env, monkeypatch):
+    out = batch(app_env, ["indirect_injection_log"], factory_for([CLEAN]), batch_id="b1",
+                temperatures=(0.3,))
+    batch_plan.update_plan(out["out_dir"], ended_at=None, aborted=None)
+    monkeypatch.setattr(control, "port_open", lambda host, port: True)
+    monkeypatch.setattr(control, "process_alive", lambda plan: (True, False))
+    at = _run()
+    assert "b1: RUNNING" in _text(at) and "Stop is off for b1" in _text(at)
+    assert at.checkbox[0].disabled is True
+
+
+def test_finishing_batch_offers_no_regrade(app_env, monkeypatch):
+    out = batch(app_env, ["indirect_injection_log"], factory_for([CLEAN]), batch_id="b1",
+                temperatures=(0.3,))
+    os.remove(os.path.join(out["out_dir"], "results.json"))
+    monkeypatch.setattr(control, "process_alive", lambda plan: (True, True))
+    at = _run()
+    assert "b1: FINISHING" in _text(at)
+    assert not any(b.label == "Regrade this batch" for b in at.button)
+    assert [b for b in at.button if b.label == "Start"][0].disabled is True
+
+
+@pytest.mark.parametrize("name,needle", [("..\\x", "may only use"), ("b1", "already exists")])
+def test_bad_or_reused_batch_name_cannot_start(app_env, name, needle):
+    batch(app_env, ["indirect_injection_log"], factory_for([CLEAN]), batch_id="b1",
+          temperatures=(0.3,))
+    at = _run()
+    [x for x in at.text_input if x.label == "Batch name"][0].set_value(name).run()
+    assert needle in _text(at)
+    assert [b for b in at.button if b.label == "Start"][0].disabled is True
+
+
+def test_results_page_flags_a_live_or_short_batch_as_incomplete(app_env, monkeypatch):
+    out = batch(app_env, ["indirect_injection_log"], factory_for([CLEAN, BAD]), n_runs=2,
+                batch_id="b1", temperatures=(0.3,))
+    assert "INCOMPLETE" not in _text(_run("Results"))
+    batch_plan.update_plan(out["out_dir"], ended_at=None, aborted=None)
+    monkeypatch.setattr(control, "process_alive", lambda plan: (True, True))
+    text = _text(_run("Results"))
+    assert "INCOMPLETE" in text and "NO, incomplete" in text and "RUNNING" in text
+    monkeypatch.setattr(control, "process_alive", lambda plan: (False, False))
+    batch_plan.update_plan(out["out_dir"], ended_at="t", aborted=False, planned_runs=9)
+    assert "INCOMPLETE" in _text(_run("Results"))
+
+
+def test_model_text_in_parse_reason_is_plain_text(app_env):
+    evil = '{"tool": "![x](http://evil.example/p.png)", "args": {}}'
+    batch(app_env, ["indirect_injection_log"], factory_for([[evil, FINAL]]), batch_id="b1",
+          temperatures=(0.3,))
+    at = _run("Inspect a run")
+    assert not any("evil.example" in str(m.value) for m in at.markdown)
+    assert not any("evil.example" in str(m.value) for m in at.caption)
+    assert any("evil.example" in str(x.value) for x in at.text)
 
 
 def _run(page=None):
