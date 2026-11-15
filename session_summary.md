@@ -103,3 +103,18 @@ During the final code review, an offline check may have opened a TLS connection 
 - `docs/superpowers/plans/2026-11-14-post-gate3.md`: implementation plan
 - `docs/superpowers/specs/2026-11-14-gate3-handover.md`: Gate 3 handover and open minor items
 - `docs/progress-report-2026-11-14.html`: phone-readable progress report (not committed)
+
+## Hosted cost estimate (written 2026-11-15 before the first hosted call)
+
+Measured on the 54 qwen2.5:7b three-temperature runs: about 3,800 prompt tokens and 125 output tokens per run in total (the largest single run was 7,300 prompt tokens). The step cap of 12 and the 4,096 output-token limit per reply bound the worst case.
+
+| Batch | Runs | Expected input tokens | Worst-case input tokens |
+|---|---|---|---|
+| `anthropic/claude-haiku-4-5` | 54 | about 0.2 million | about 1.3 million |
+| `anthropic/claude-haiku-5-5` | 18 | about 0.07 million | about 0.45 million |
+| `anthropic/claude-sonnet-5-5` | 18 | about 0.07 million | about 0.45 million |
+| `anthropic/claude-opus-5-5` | 18 | about 0.07 million | about 0.45 million |
+
+Expected output is a few thousand tokens per batch; models that think by default will use more, up to 4,096 per reply. No price is quoted here because the harness has no price table (see BACKLOG.md, "Per-model token and cost totals"). At these volumes the four Anthropic batches together are expected to cost a few dollars at most, well inside the director's $100 credit. The actual token counts per batch are in the run log (`prompt_token_count`, `token_count`).
+
+Groq (`groq/openai/gpt-oss-120b`, 18 runs) is on the free tier with no card attached and cannot be charged. Cerebras is not called.
