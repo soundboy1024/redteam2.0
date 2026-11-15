@@ -1,26 +1,17 @@
 """Results half of a batch: grade the logged runs, write the results folder, and store
 the graded rows in the run log. Called once per batch by run_eval, on every exit path.
 """
-import hashlib
-
 from telemetry.grader import grade_logged_run
 from telemetry.logger import (log_result, read_result_rows, read_run_inputs, read_runs,
                               read_steps, read_tool_events)
 from telemetry.report import (write_results_json, write_summary_md,
                               write_transcript_md)
+from telemetry.trajectory import trajectory_hash  # noqa: F401  (re-exported)
 from traps.events_db import fetch_events
 
 
 class LogWriteError(RuntimeError):
     """The run log could not be written. Not caught by run_one: the batch aborts."""
-
-
-def trajectory_hash(steps: list[dict]) -> str:
-    """SHA-256 hex of the run's reply texts (step_index >= 1, in order) joined with
-    the record separator; a None reply counts as an empty string."""
-    replies = [s["raw_response"] or "" for s in sorted(steps, key=lambda s: s["step_index"])
-               if s["step_index"] >= 1]
-    return hashlib.sha256("\x1e".join(replies).encode("utf-8")).hexdigest()
 
 
 def _store(batch_log, row: dict) -> None:

@@ -910,8 +910,12 @@ def test_plan_flag_missing_key_exits_1(env, no_keys, capsys):
 
 
 def _three(env):
-    return batch(env, ["benign_tempting"], factory_for(default=[LIST, READ_LOG, FINAL]),
-                 n_runs=3)
+    out = batch(env, ["benign_tempting"], factory_for(default=[LIST, READ_LOG, FINAL]),
+                n_runs=3)
+    # the batch ran inside this test process, which is still alive; record a different
+    # creation time so the plan describes a batch process that is gone
+    batch_plan.update_plan(out["out_dir"], pid_create_time=1)
+    return out
 
 
 def _raw_results(cfg):
@@ -979,3 +983,78 @@ def test_regrade_short_batch_with_plan_is_aborted(env):
     assert doc["batch"]["abort_reason"] == "regraded after the batch stopped early"
     after = batch_plan.read_plan(d)
     assert after["aborted"] is True and after["ended_at"]
+
+
+# ---- review fixes: plan robustness, regrade liveness, invalid runs ----------
+
+def test_plan_records_process_creation_time(env):
+    out = batch(env, ["benign_tempting"], factory_for([[LIST, READ_LOG, FINAL]]))
+    plan = batch_plan.read_plan(out["out_dir"])
+    assert plan["pid_create_time"] == batch_plan.process_create_time(os.getpid())
+    assert isinstance(plan["pid_create_time"], int)
+
+
+def test_plan_write_failure_at_start_still_stops_listener(env, monkeypatch):
+    _, _, calls = env
+
+    def locked(out_dir, **fields):
+        raise PermissionError("batch.json is locked")
+    monkeypatch.setattr(run_eval.batch_plan, "update_plan", locked)
+    with pytest.raises(PermissionError):
+        batch(env, ["benign_tempting"], factory_for([[FINAL]]))
+    assert calls["stop"] == ["proc"]  # the listener is never left holding the port
+
+
+def test_plan_write_failure_at_end_does_not_block_results(env, monkeypatch, caplog):
+    cfg, _, calls = env
+
+    def locked(*a, **k):
+        raise PermissionError("batch.json is locked")
+    monkeypatch.setattr(run_eval.batch_plan, "finalise_plan", locked)
+    with caplog.at_level(logging.ERROR, logger="run_eval"):
+        out = batch(env, ["benign_tempting"], factory_for([[LIST, READ_LOG, FINAL]]))
+    assert len(out["results"]) == 1 and calls["stop"] == ["proc"]
+    assert (pathlib.Path(out["out_dir"]) / "results.json").is_file()
+    assert any("batch.json" in r.getMessage() for r in caplog.records)
+
+
+@pytest.mark.parametrize("bad,needle", [("../x", "invalid batch_id"), ("b1", "already exists")])
+def test_plan_flag_rejects_bad_or_reused_batch_id(env, capsys, bad, needle):
+    _, cfg_path, _ = env
+    _two_run_batch(env, "b1")
+    assert run_eval.main(["--config", cfg_path, "--models", "m", "--allow-any-model",
+                          "--batch-id", bad, "--plan"]) == 1
+    assert needle in capsys.readouterr().err
+
+
+def test_regrade_refuses_while_the_batch_process_is_alive(env, capsys):
+    cfg, cfg_path, _ = env
+    out = _three(env)
+    _delete_results(cfg)
+    # the plan now names this live test process as the batch process, not yet ended
+    batch_plan.update_plan(out["out_dir"], ended_at=None, aborted=None,
+                           pid_create_time=batch_plan.process_create_time(os.getpid()))
+    assert run_eval.main(["--config", cfg_path, "--regrade", "b1"]) == 1
+    assert "still running" in capsys.readouterr().err
+    assert _raw_results(cfg) == []
+    # a different process with the same pid number is not this batch: regrade proceeds
+    batch_plan.update_plan(out["out_dir"], pid_create_time=1)
+    assert run_eval.main(["--config", cfg_path, "--regrade", "b1"]) == 0
+    assert len(_raw_results(cfg)) == 3
+
+
+def test_invalid_run_is_graded_at_batch_end_not_per_run(env):
+    cfg, _, _ = env
+    seen = []
+
+    def factory(model, rep, temperature):
+        seen.append(len(_logger.read_result_rows(cfg["db_path"], "b1"))
+                    if os.path.exists(cfg["db_path"]) else 0)
+        return Script([OllamaError("down")] if rep == 0 else [LIST, READ_LOG, FINAL])
+    out = batch(env, ["benign_tempting"], factory, n_runs=3)
+    # run 0 is invalid: its row is not stored when it ends, so a listener row that
+    # lands late can never be frozen out of it; it is graded with the batch
+    assert seen == [0, 0, 1]
+    assert [r["cell"] for r in out["results"]] == ["invalid", "completed_clean",
+                                                    "completed_clean"]
+    assert len(_logger.read_result_rows(cfg["db_path"], "b1")) == 3

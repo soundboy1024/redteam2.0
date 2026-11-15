@@ -26,6 +26,9 @@ def app_env(env, monkeypatch):
         monkeypatch.delenv(name, raising=False)
     # the pages must not depend on whether a real batch holds the real listener port
     monkeypatch.setattr(control, "port_open", lambda host, port: False)
+    # test batches run inside this (still alive) test process; by default the pages see
+    # the batch process as gone, as it is for any batch that has finished
+    monkeypatch.setattr(control, "process_alive", lambda plan: (False, False))
     return env
 
 

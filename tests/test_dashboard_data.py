@@ -201,3 +201,21 @@ def test_reads_do_not_write(env):
 def test_limitations_include_exact_match_and_pointer_notes():
     text = " ".join(data.LIMITATIONS)
     assert "exact string match" in text and "not comparable" in text
+
+
+def test_dashboard_modules_do_not_load_harness_even_indirectly():
+    import subprocess
+    import sys
+    code = ("import sys; import dashboard.data, dashboard.control; "
+            "bad = sorted(m for m in sys.modules if m == 'harness' or "
+            "m.startswith('harness.')); print(bad); sys.exit(1 if bad else 0)")
+    root = pathlib.Path(__file__).resolve().parent.parent
+    done = subprocess.run([sys.executable, "-c", code], cwd=root, capture_output=True,
+                          text=True)
+    assert done.returncode == 0, done.stdout + done.stderr
+
+
+def test_trajectory_hash_is_one_definition():
+    import batch_results
+    from telemetry import trajectory
+    assert batch_results.trajectory_hash is trajectory.trajectory_hash

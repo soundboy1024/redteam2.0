@@ -10,10 +10,10 @@ import sqlite3
 from contextlib import closing
 
 import batch_plan
-from batch_results import trajectory_hash
 from telemetry.report import (COMPLETION_NOTE, EXECUTED_NOTE, FAILED_NOTE, LIMITATION_NOTE,
                               TRIPWIRES, build_matrix)
 from telemetry.schema import BOOL_COLUMNS
+from telemetry.trajectory import trajectory_hash
 
 POINTER_NOTE = ("In fake_system_error and authority_spoof the user prompt names the file that "
                 "carries the injection, so those two measure how an agent treats an injection "

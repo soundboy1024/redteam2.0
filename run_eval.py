@@ -25,7 +25,7 @@ from harness.agent_loop import SYSTEM_PROMPT
 from harness.runner import load_scenarios, run_one
 from listener_proc import start_listener, stop_listener
 from rt_config import ConfigError, load_config
-from telemetry.logger import (JSONL_FILES, existing_batch, log_run, log_run_inputs,
+from telemetry.logger import (JSONL_FILES, check_new_batch_id, existing_batch, log_run, log_run_inputs,
                               log_step, log_tool_event, open_batch, read_result_rows,
                               read_runs, read_step_run_ids)
 from traps.validate_scenarios import validate
@@ -200,8 +200,12 @@ def _run_all(prep: PreparedBatch, state: dict) -> None:
                                   step_sink=step_sink, event_sink=event_sink)
                     record_run(rec)
                     state["recorded"] += 1
-                    # stored now, so a live view has a grade to show (CLAUDE.md 4.8)
-                    grade_and_store_run(cfg, batch_log, prep.scenarios, rec["run_id"])
+                    # Stored now, so a live view has a grade to show (CLAUDE.md 4.8).
+                    # An invalid run waits for the end of the batch: after a listener
+                    # fault its listener row can still land late, and a stored row is
+                    # never corrected.
+                    if rec["status"] != "invalid":
+                        grade_and_store_run(cfg, batch_log, prep.scenarios, rec["run_id"])
                     consecutive = consecutive + 1 if rec["status"] == "invalid" else 0
                     if consecutive >= cfg["max_consecutive_invalid"]:
                         log.error("aborting batch %s: %d consecutive invalid runs",
@@ -233,10 +237,12 @@ def execute_batch(prep: PreparedBatch) -> dict:
         _remove_empty_batch(batch_log)
         raise ListenerStartError(str(exc)) from exc
     started_at = _now()
-    batch_plan.update_plan(batch_log.out_dir, pid=os.getpid(), started_at=started_at)
     state = {"recorded": 0, "aborted": False, "abort_reason": None}
     error = None
-    try:
+    try:  # inside the guarded block: a failure here must still stop the listener
+        batch_plan.update_plan(
+            batch_log.out_dir, pid=os.getpid(), started_at=started_at,
+            pid_create_time=batch_plan.process_create_time(os.getpid()))
         _run_all(prep, state)
     except BaseException as exc:  # held, results written below, then re-raised
         error = exc
@@ -252,8 +258,12 @@ def execute_batch(prep: PreparedBatch) -> dict:
                                            if not remote_client.accepts_temperature(m)],
             "started_at": started_at, "ended_at": _now(), "aborted": state["aborted"],
             "abort_reason": state["abort_reason"]}
-    batch_plan.finalise_plan(batch_log.out_dir, meta["ended_at"], state["aborted"],
-                             state["abort_reason"])
+    try:
+        batch_plan.finalise_plan(batch_log.out_dir, meta["ended_at"], state["aborted"],
+                                 state["abort_reason"])
+    except Exception:  # logged; a plan file must never stop the results being written
+        log.exception("batch %s: could not write the end of the batch to batch.json; "
+                      "results are still written", batch_log.batch_id)
     if error is None:
         results = write_batch_results(cfg, batch_log, prep.scenarios, meta)
         if stop_error is not None:
@@ -324,6 +334,19 @@ def _regrade_meta(batch_id: str, runs: list[dict], plan: dict | None) -> dict:
             "aborted": aborted, "abort_reason": reason, "regraded_at": _now()}
 
 
+def _batch_process_alive(plan: dict) -> bool:
+    """Is the process this plan records still alive. A plan with a creation time needs
+    both pid and creation time to match; an older plan counts as alive only while it has
+    not ended and its pid exists."""
+    created = batch_plan.process_create_time(plan.get("pid"))
+    if created is None:
+        return False
+    recorded = plan.get("pid_create_time")
+    if recorded is None:
+        return not plan.get("ended_at")
+    return created == recorded
+
+
 def regrade(cfg: dict, batch_id: str, scenarios: list[dict]) -> dict:
     """Complete a batch that was logged but not fully graded (CLAUDE.md 4.8). Starts no
     listener and calls no model. Stored result rows are kept, never overwritten."""
@@ -338,6 +361,9 @@ def regrade(cfg: dict, batch_id: str, scenarios: list[dict]) -> dict:
         raise ValueError(f"every run of batch {batch_id!r} already has a stored result "
                          "and its files exist; nothing to regrade")
     plan = batch_plan.read_plan(batch_log.out_dir)
+    if plan is not None and _batch_process_alive(plan):
+        raise ValueError(f"batch {batch_id!r} is still running (process {plan['pid']}); "
+                         "regrade it only after it has stopped")
     meta = _regrade_meta(batch_id, runs, plan)
     recorded = {r["run_id"] for r in runs}
     orphans = [i for i in read_step_run_ids(batch_log.out_dir) if i not in recorded]
@@ -502,6 +528,10 @@ def main(argv: list[str] | None = None) -> int:
     given = list(sys.argv[1:] if argv is None else argv)
     command = ["run_eval.py", *(a for a in given if a != "--plan")]
     if args.plan:
+        try:
+            check_new_batch_id(cfg["results_dir"], batch_id)
+        except ValueError as exc:
+            return _fail(str(exc))
         print(json.dumps(_plan(batch_id, models, scenario_ids, temperatures, n_runs,
                                telemetry, command)))
         return 0

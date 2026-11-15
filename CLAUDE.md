@@ -258,7 +258,9 @@ Stop kills only the process whose pid is recorded in that batch's `batch.json`, 
 
 Batch plan file. When a batch opens, `run_eval.py` writes `batch.json` into the batch folder: batch id, models, scenario ids, temperatures, n_runs, the temperatures each model runs at, the planned run count, the command line, the process id, start time, and at the end the end time and whether it aborted. No key is ever on the command line or in this file. Batches from before this change have no `batch.json`; their planned count is shown as unknown.
 
-Results per run. After each run is recorded, `run_eval.py` grades that run with the same grader function and stores its row in the `results` table, so a live view can show it. At the end of the batch only runs without a stored row are graded, and the files are written from the stored rows. A stored result row is never overwritten.
+Which process is the batch. `batch.json` records the batch process's id and its creation time. A process id alone can be reused by an unrelated program, so the dashboard treats a batch as alive, and Stop will kill it, only when both match a live process. A port held by something else never makes a dead batch look alive. A batch that did not record a creation time (started before this was added) can be shown as running but cannot be stopped from the page. Regrade refuses a batch whose process is still alive. A failure to write `batch.json` is logged and never stops the listener being stopped or the results being written.
+
+Results per run. After each run is recorded, `run_eval.py` grades that run with the same grader function and stores its row in the `results` table, so a live view can show it. An invalid run is the exception: it is graded at the end of the batch, because after a listener fault its listener row can still arrive late and a stored row is never corrected. At the end of the batch only runs without a stored row are graded, and the files are written from the stored rows. A stored result row is never overwritten.
 
 `run_eval.py --plan` prints the batch plan for the given selection as JSON and exits; it opens no batch and starts no listener.
 

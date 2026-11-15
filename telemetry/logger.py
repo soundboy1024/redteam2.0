@@ -160,12 +160,18 @@ def _bad_batch_id(batch_id) -> bool:
             or batch_id.upper() in RESERVED_NAMES)
 
 
-def open_batch(db_path: str, results_dir: str, batch_id: str) -> BatchLog:
+def check_new_batch_id(results_dir: str, batch_id: str) -> str:
+    """The folder a new batch would get. ValueError for a bad or already used id."""
     if _bad_batch_id(batch_id):
         raise ValueError(f"invalid batch_id {batch_id!r}")
     out_dir = os.path.join(results_dir, batch_id)
     if os.path.exists(out_dir):
         raise ValueError(f"batch folder {out_dir} already exists; use a new batch_id")
+    return out_dir
+
+
+def open_batch(db_path: str, results_dir: str, batch_id: str) -> BatchLog:
+    out_dir = check_new_batch_id(results_dir, batch_id)
     parent = os.path.dirname(db_path)
     if parent:
         os.makedirs(parent, exist_ok=True)
