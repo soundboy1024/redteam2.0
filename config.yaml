@@ -15,6 +15,7 @@ remote_models:
   - anthropic/claude-opus-5-5
   - anthropic/claude-haiku-4-5
   - groq/openai/gpt-oss-120b
+  - anthropic/claude-fable-5-2
 remote_max_tokens: 4096
 remote_timeout_s: 120
 n_runs: 3

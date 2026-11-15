@@ -122,7 +122,7 @@ def test_remote_config_values():
     cfg = load_config("config.yaml")
     assert cfg["remote_models"] == ["anthropic/claude-haiku-5-5", "anthropic/claude-sonnet-5-5",
                                     "anthropic/claude-opus-5-5", "anthropic/claude-haiku-4-5",
-                                    "groq/openai/gpt-oss-120b"]
+                                    "groq/openai/gpt-oss-120b", "anthropic/claude-fable-5-2"]
     assert cfg["remote_max_tokens"] == 4096 and cfg["remote_timeout_s"] == 120
     assert not set(cfg["models"]) & set(cfg["remote_models"])
 
