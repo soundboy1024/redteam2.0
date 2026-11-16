@@ -9,8 +9,12 @@ This file is the running record of where the project stands. It is updated at th
 - Phases 1 to 4 are built. Gates 1, 2 and 3 were re-run at head on 2026-11-15 (about 20:50 UTC) and pass; Gate 3 ran against `llama3.2:3b`.
 - The control panel and inspector (Phase 4, `CLAUDE.md` 4.8) are built: `run_dashboard.bat`, port 8503, three pages (Run, Results, Inspect a run).
 - **Gate 4 passed and the director signed it off on 2026-11-15.** Batch `gate4-qwen7b-llama31`, started from the Run page through the Chrome extension: 108 of 108 runs valid, not aborted. Evidence: `gates/evidence/gate4.txt`, `gate4.json` and two inspector screenshots.
-- 925 tests pass, 1 skipped. `scripts/check_rules.py` exits 0.
-- The pages have now been looked at in Chrome. Two bugs seen, not fixed: on "Inspect a run", after ticking "Compromised runs only" the Run select box kept the label of a different run than the one shown; on the Run page the "Started" message prints the console path as `results_console\...` (the folder is `results\_console\`).
+- **Phase 5 (model sweep, `CLAUDE.md` 4.9) is built but Gate 5 has not been run.** `sweep.py`, `sweep_record.py`, `sweep_probe.py`, `sweep_queue.yaml`, `gates/gate5.py`. Tested with fakes only: no model has been pulled or deleted by it yet. The read-only probes were checked against the real Ollama server. Not committed.
+- `README.md` written for a public repo. Not committed. There is no git remote yet.
+- The Anthropic key in the user environment was replaced (checked 2026-11-15: different from the leaked key, and a live call works). Whether the old key was deleted in the Console is not known here.
+- The sweep had one independent review. Fixed from it: a pull that adds no new name claims nothing (a differently spelled tag could have led to deleting an installed model); an earlier attempt's claim needs the same digest; a batch that cannot be stopped keeps its model and stops the sweep; a batch with no valid run fails; batch id length is checked up front; paths are absolute. Left open (minor): a later attempt that fails early drops the earlier attempt's claim, so that model stays on disk; the memory watch loop has no time limit of its own; a `taskkill` that reports failure after the process is gone.
+- 1023 tests pass, 1 skipped. `scripts/check_rules.py` exits 0.
+- The pages have now been looked at in Chrome. Two bugs were seen and fixed the same day (not yet committed): on "Inspect a run", after ticking "Compromised runs only" the Run select box kept the label of a different run than the one shown (checked fixed in Chrome); on the Run page the "Started" message printed the console path as `results_console\...` instead of `results\_console\...` (checked by test only, since clicking Start would start a batch).
 
 ## Waiting on the director
 
@@ -36,6 +40,8 @@ This file is the running record of where the project stands. It is updated at th
 - 2026-11-15: the fixture file holding the pasted key was restored with the director's approval.
 - 2026-11-15: Gate 4 signed off. Order after it: fix the two page bugs, model sweep, configurable tools; Gemini (key variable `GOOGLE_API_KEY`) any time after Gate 4.
 - 2026-11-15: two local models in one batch stays, with `OLLAMA_MAX_LOADED_MODELS=1`.
+- 2026-11-15: model sweep design approved (a separate script that drives `run_eval.py`); moved from the backlog into `CLAUDE.md` 4.9 and Phase 5.
+- 2026-11-15: the repository is to be made public (job search, not a business). A README was asked for.
 
 ## What changed on `phase4`
 
@@ -152,8 +158,9 @@ Limitations that apply to every result here: canary matching is exact string mat
 ## Still to do
 
 - Everything under "Waiting on the director".
-- Fix the two page bugs listed under "Current state".
-- Model sweep (`BACKLOG.md`, Tier 1b): design first. It replaces the local comparison runs that were never done (`gemma2`, `phi4-mini`, `ministral-3:8b`, `llama3.2:3b`).
+- Gate 5 (director gate): a two-entry sweep run twice, then `gates\gate5.py --sweep-id <id>`. Needs the director's word, because it downloads a model and runs three batches. Then the full 13-model sweep.
+- Remote repository: none yet. Before making it public: director's call on the commit email (all commits carry a personal address), merge `phase4` into `main`.
+- Hosted quota handling (`BACKLOG.md`, Tier 1b): resume, per-provider pause, clean stop on rate-limit storms, retry for Groq's HTTP 400.
 - Configurable tool set and the Gemini provider, in that order unless the director says otherwise.
 - Project hooks and permission allowlist in `.claude/settings.json`.
 - Minor items in `docs/superpowers/specs/2026-11-14-gate3-handover.md` and `BACKLOG.md`.
@@ -166,6 +173,9 @@ run_dashboard.bat                                              control panel on 
 .venv\Scripts\python.exe run_eval.py --models <m> --batch-id <id> --plan     show what it would run
 .venv\Scripts\python.exe run_eval.py --regrade <batch_id>                    finish grading a stopped batch
 .venv\Scripts\python.exe gates\gate4.py --batch-id <id>                      Gate 4
+.venv\Scripts\python.exe sweep.py --sweep-id <name> --dry-run                 show what a sweep would do
+.venv\Scripts\python.exe sweep.py --sweep-id <name>                           run or continue a sweep
+.venv\Scripts\python.exe gates\gate5.py --sweep-id <id>                      Gate 5
 .venv\Scripts\python.exe -m pytest -q                                        tests
 .venv\Scripts\python.exe scripts\check_rules.py                              rule check
 ```
@@ -179,6 +189,7 @@ The control panel only shows hosted models whose key is in its environment. Keys
 
 ## Related documents
 
+- `docs/superpowers/specs/2026-11-15-model-sweep-design.md`, `docs/superpowers/plans/2026-11-15-model-sweep.md`: model sweep design and plan
 - `docs/superpowers/specs/2026-11-15-control-panel-and-overnight-design.md`: design
 - `docs/superpowers/plans/2026-11-15-control-panel-and-overnight.md`: implementation plan
 - `docs/superpowers/specs/2026-11-14-post-gate3-design.md`, `docs/superpowers/plans/2026-11-14-post-gate3.md`: the previous change set

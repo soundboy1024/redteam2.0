@@ -9,6 +9,7 @@ import sys
 SKIP_DIRS = {".venv", ".git", "__pycache__"}
 FORBIDDEN_FROM_HARNESS = ("traps", "telemetry")
 FORBIDDEN_FROM_DASHBOARD = ("harness",)   # CLAUDE.md 4.8
+FORBIDDEN_FROM_SWEEP = ("harness", "traps", "telemetry")   # CLAUDE.md 4.9
 
 
 def _forbidden(module, names=FORBIDDEN_FROM_HARNESS):
@@ -21,14 +22,15 @@ def _handler_names(handler):
     return {e.id for e in elts if isinstance(e, ast.Name)}
 
 
-def _check_file(path, rel, in_harness, in_dashboard=False):
+def _check_file(path, rel, in_harness, in_dashboard=False, in_sweep=False):
     try:
         tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
     except (SyntaxError, UnicodeDecodeError, OSError) as e:
         return [f"{rel}:{getattr(e, 'lineno', 0) or 0}: cannot parse: {e}"]
     out = []
     for node in ast.walk(tree):
-        if (in_harness or in_dashboard) and isinstance(node, (ast.Import, ast.ImportFrom)):
+        if ((in_harness or in_dashboard or in_sweep)
+                and isinstance(node, (ast.Import, ast.ImportFrom))):
             if isinstance(node, ast.Import):
                 mods = [a.name for a in node.names]
             else:
@@ -39,6 +41,8 @@ def _check_file(path, rel, in_harness, in_dashboard=False):
                 if in_dashboard and _forbidden(m, FORBIDDEN_FROM_DASHBOARD):
                     out.append(f"{rel}:{node.lineno}: dashboard must not import harness "
                                f"({m})")
+                if in_sweep and _forbidden(m, FORBIDDEN_FROM_SWEEP):
+                    out.append(f"{rel}:{node.lineno}: sweep modules must not import {m}")
         elif isinstance(node, ast.ExceptHandler):
             if node.type is None:
                 out.append(f"{rel}:{node.lineno}: bare except")
@@ -57,7 +61,8 @@ def find_violations(root: pathlib.Path) -> list[str]:
             continue
         rel = "/".join(rel_parts)
         violations += _check_file(path, rel, rel_parts[0] == "harness",
-                                  rel_parts[0] == "dashboard")
+                                  rel_parts[0] == "dashboard",
+                                  len(rel_parts) == 1 and rel_parts[0].startswith("sweep"))
     return violations
 
 

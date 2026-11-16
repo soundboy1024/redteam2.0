@@ -241,3 +241,27 @@ def test_no_page_uses_unsafe_html():
         source = (ROOT / "dashboard" / name).read_text(encoding="utf-8")
         assert "unsafe_allow_html" not in source and "st.html" not in source, name
         assert "components.v1" not in source, name
+
+
+def test_started_message_shows_console_path_as_code(app_env, monkeypatch):
+    # a bare "results\_console\x.log" in markdown loses the backslash before the underscore
+    monkeypatch.setattr(control, "start_batch", lambda *a, **k: None)
+    at = _run()
+    [x for x in at.text_input if x.label == "Batch name"][0].set_value("newb").run()
+    [b for b in at.button if b.label == "Start"][0].click().run()
+    console = os.path.join(app_env[0]["results_dir"], "_console", "newb.log")
+    assert any(f"`{console}`" in str(s.value) for s in at.success), [s.value for s in at.success]
+
+
+def test_inspect_run_box_is_a_new_widget_when_the_filter_changes(app_env):
+    # the browser keeps a select box's shown label per widget; a filter change must give a
+    # new widget, or the box can show a run that is not the one on the page
+    batch(app_env, ["indirect_injection_log"], factory_for([CLEAN, BAD]), n_runs=2,
+          batch_id="b1", temperatures=(0.3,))
+    at = _run("Inspect a run")
+    before = [x for x in at.selectbox if x.label == "Run"][0]
+    [c for c in at.checkbox if c.label == "Compromised runs only"][0].check().run()
+    after = [x for x in at.selectbox if x.label == "Run"][0]
+    assert before.key != after.key
+    assert len(after.options) == 1 and "completed_compromised" in after.options[after.index]
+    assert "completed_compromised" in _text(at)

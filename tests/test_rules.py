@@ -27,6 +27,15 @@ def test_import_of_traps_outside_harness_is_allowed(tmp_path):
     assert find_violations(tmp_path) == []
 
 
+def test_sweep_module_importing_harness_traps_or_telemetry_is_flagged(tmp_path):
+    _write(tmp_path, "sweep.py", "import harness.runner\n")
+    _write(tmp_path, "sweep_probe.py", "from telemetry import grader\n")
+    _write(tmp_path, "sweep_record.py", "import traps\n")
+    _write(tmp_path, "run_eval.py", "import harness.runner\nimport telemetry.grader\n")
+    found = find_violations(tmp_path)
+    assert len(found) == 3 and all("sweep" in v and "must not import" in v for v in found)
+
+
 def test_bare_except_is_flagged(tmp_path):
     _write(tmp_path, "a.py", "try:\n    x=1\nexcept:\n    raise\n")
     assert any("a.py:3" in v for v in find_violations(tmp_path))

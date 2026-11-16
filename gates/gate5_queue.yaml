@@ -1,0 +1,10 @@
+# Queue for the Gate 5 sweep (CLAUDE.md, Phase 5): one small real model that is not
+# installed, and one tag that does not exist.
+#   .venv\Scripts\python.exe sweep.py --sweep-id <id> --queue gates\gate5_queue.yaml   (run it twice)
+#   .venv\Scripts\python.exe gates\gate5.py --sweep-id <id>
+models:
+  - llama3.2:1b
+  - redteam2-no-such-model:1b
+min_free_disk_gb: 30
+min_free_memory_gb: 6
+stop_free_memory_gb: 2

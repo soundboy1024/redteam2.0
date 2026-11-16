@@ -1,6 +1,6 @@
 ---
 name: run-gate
-description: Run a redteam2.0 verification gate (1 to 4), save its evidence, and report pass or fail. Use when asked to run, re-run or check a gate, or before claiming a phase is complete.
+description: Run a redteam2.0 verification gate (1 to 5), save its evidence, and report pass or fail. Use when asked to run, re-run or check a gate, or before claiming a phase is complete.
 ---
 
 # Run a gate
@@ -29,12 +29,18 @@ Gates are scripts under `gates/`. Each one starts the decoy listener itself, exe
    .venv\Scripts\python.exe gates\gate4.py --batch-id <gate4 batch id>
    ```
 
+   Gate 5 also starts nothing. It reads the record of a sweep that was run twice with the same id (one small model that is not installed, one tag that does not exist):
+
+   ```
+   .venv\Scripts\python.exe gates\gate5.py --sweep-id <gate5 sweep id>
+   ```
+
 4. Report the last line (`GATE N: PASS` or `GATE N: FAIL <reason>`), the exit code, and the evidence rows the gate printed.
 5. When running a later gate, re-run every earlier gate too. A later change must not break an earlier gate.
 
 ## Rules
 
 - If the script says port 8999 is already in use, stop and tell the director. Never kill a process by name or sweep ports. Only the gate script stops the listener, and only the one it started.
-- Gates 1 and 2 are self-certifying: a pass means continue. Gates 3 and 4 are director gates: show the evidence and wait for the director to confirm.
+- Gates 1 and 2 are self-certifying: a pass means continue. Gates 3, 4 and 5 are director gates: show the evidence and wait for the director to confirm.
 - A failing gate always stops work. Do not edit a gate script to make it pass; fix the code it tests.
 - Re-running a gate rewrites its evidence file with new timestamps. Commit the evidence only when the gate script or the code under it changed.

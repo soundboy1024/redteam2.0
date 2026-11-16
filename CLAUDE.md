@@ -22,7 +22,7 @@ The director is a senior systems troubleshooter and AI evaluation architect, not
 2. Build and verify incrementally. After every component, run its isolated test yourself, and record the exact CLI command so the director can re-run it. Do not continue past a failing test.
 3. Zero silent failures. Every tool call, trap hit, parse and telemetry write fails loudly in the log if anything is malformed. No bare except blocks. No except Exception: pass.
 4. Strict separation. Code under harness/ must never import from traps/ or telemetry/. The agent reaches the sandbox only through the exposed mock tools and HTTP. The grader reads the run log, never the agent's memory. The runner reads traps/scenarios.json as a data file and passes canary_files and allowed_endpoints to the tools as plain arguments; that is not an import and is the only way scenario data reaches harness/.
-5. Every gate is a script under gates/ that prints the evidence the gate asks for. Run it and save the output to gates/evidence/. Gates 1 and 2 are self-certifying: if the script passes, continue. Gates 3 and 4 are director gates: stop and wait for the director to confirm before going further. The telemetry on/off decision at Gate 3 belongs to the director. A failing gate always stops work.
+5. Every gate is a script under gates/ that prints the evidence the gate asks for. Run it and save the output to gates/evidence/. Gates 1 and 2 are self-certifying: if the script passes, continue. Gates 3, 4 and 5 are director gates: stop and wait for the director to confirm before going further. The telemetry on/off decision at Gate 3 belongs to the director. A failing gate always stops work.
 6. Phase scope is fixed. If a good idea comes up that is not in the current phase, write it to BACKLOG.md and keep going.
 
 ## 3. Core definitions
@@ -268,6 +268,48 @@ Results per run. After each run is recorded, `run_eval.py` grades that run with 
 
 The Results page can add several batches together. It lists which batches are included, flags aborted ones, and shows the limitations text every time.
 
+### 4.9 Model sweep (sweep.py)
+
+Added at the director's request on 2026-11-15. One command tests a queue of local models one at a time, so they do not all have to stay on disk:
+
+    .venv\Scripts\python.exe sweep.py --sweep-id <name> [--dry-run]
+
+The queue and three floors are in `sweep_queue.yaml`: free disk before a pull (30 GB), free memory before a pull and after a load (6 GB), and the free memory under which a running batch is stopped (2 GB).
+
+Steps for each model, in order:
+
+    1. Skip it if its done marker exists.
+    2. Preflight: the listener port is free, Ollama has no model loaded, free disk and free memory are above their floors. A failed preflight stops the whole sweep.
+    3. Note whether the model is already installed.
+    4. Pull it. A failed pull is recorded (pull_failed) and the sweep moves on.
+    5. Load check: one short request at the harness's num_ctx. Record size in memory, GPU share, backend (read from Ollama's log), tokens per second and free memory. Free memory under the floor after loading is recorded as does_not_fit and no batch is run.
+    6. One batch per temperature through `run_eval.py --models <tag> --allow-any-model --temperatures <t> --batch-id sweep-<sweep id>-<model>-t<t>`, with the model unloaded after each batch. A failed batch stops the remaining batches for that model.
+    7. While a batch runs, free memory is read every 30 seconds. Under the stop floor, the batch is stopped and regraded, and the model is recorded as stopped_for_memory.
+    8. Confirm each batch: exit code 0, results.json present, batch.json ended and not aborted, recorded runs equal to planned runs.
+    9. Unload, write the record, then delete the model if the sweep pulled it.
+    10. Write the done marker, only if the status is completed.
+
+Rules:
+
+- The sweep imports nothing from `harness/`, `traps/` or `telemetry/`. A batch is only ever the `run_eval.py` command run as a separate process, as on the Run page.
+- A model that was installed before the sweep is never deleted. A model the sweep pulled is deleted whatever its result, except when it would not unload. If an earlier attempt of the same sweep pulled a model and did not delete it, a later attempt still treats it as the sweep's own, but only while the installed model has the digest that attempt recorded. A pull that reports success but adds no new name to the installed list (the tag is another spelling of an installed model) claims nothing and is recorded as pull_failed.
+- A batch with no valid run is a failed batch, not a result.
+- If a batch cannot be stopped, its model is left installed and loaded, the record says so, and the sweep stops (exit code 4).
+- The record is written before a pull, after a pull, before a delete and after every model, so a crash never leaves a model that looks like it was not the sweep's.
+- A batch is stopped only through the pid in its own `batch.json`. A batch that has not written `batch.json` is left running and that is recorded. Nothing is killed by name and no port is swept.
+- A model that did not complete gets a record with its reason and no done marker; the next start with the same sweep id tries it again, with `-r<attempt>` added to its batch ids.
+- Three models in a row that fail to pull or load stop the sweep. Ctrl+C stops the current batch, cleans up that model and stops the sweep.
+
+Statuses: completed, does_not_fit, pull_failed, load_failed, batch_failed, stopped_for_memory, stopped.
+
+Output, under `results/_sweep/<sweep id>/`: `sweep.json` and `sweep.md` (the record, rewritten after every model, with the limitations text), `sweep.log`, and `done/<model>.done` markers. Each model's results are in its own batch folders and can be added together on the Results page.
+
+Exit codes: 0 queue finished (single models may still have failed; the record says), 2 preflight or bad arguments, 3 three pull or load failures in a row, 4 a batch left running, 130 interrupted.
+
+Known limitation: a model the sweep pulled and failed to delete is deleted on a later start even if the director has meanwhile decided to keep it, because an identical reinstall has the same digest. Delete the record's entry or use a new sweep id to keep such a model.
+
+Known limitation: the record holds the system's free memory at the start and end of each batch, not the Ollama runner's own size, so the growth it shows includes other programs.
+
 ## 5. Directory layout
 
     redteam2/
@@ -298,12 +340,16 @@ The Results page can add several batches together. It lists which batches are in
             runs.db                 generated
         batch_plan.py           batch.json: build, write, read, finalise
         run_dashboard.bat       launcher, port 8503
+        sweep.py                model sweep: per-model steps, the loop, the command line
+        sweep_record.py         queue file, fit record, done markers
+        sweep_probe.py          calls to Ollama and the operating system
+        sweep_queue.yaml        models to sweep, and the disk and memory floors
         dashboard/
             app.py              the three pages
             data.py             read-only queries
             control.py          plan preview, start, stop
         gates/
-            gate1.py to gate4.py, evidence/
+            gate1.py to gate5.py, evidence/
         tests/
             test_listener.py
             test_tools.py
@@ -341,6 +387,12 @@ One Streamlit app, dark theme, three views. The first, the Run page, is the cont
 2. Run inspector. Select one run. Show the poisoned fixture text on the left, the agent's raw tool call JSON on the right, the step where the state changed to POST_POISON_INGESTION, and which tripwires fired. Entropy trace appears only if telemetry was on for that run.
 
 Gate 4. Run the full matrix for two models at n_runs 3, as one fresh batch started from the Run page, and show the inspector on one compromised run.
+
+### Phase 5. Model sweep
+
+Build the sweep in 4.9: `sweep_record.py`, `sweep_probe.py`, `sweep.py`, `sweep_queue.yaml`.
+
+Gate 5. Run a sweep of two entries, one small real model that is not installed and one tag that does not exist, then start the same sweep again. Show the real model completed with every batch confirmed and the model deleted, the bad tag recorded as pull_failed, and the second start skipping the finished model. `gates/gate5.py --sweep-id <id>` reads the sweep's record and starts nothing.
 
 ## 7. Demo target
 

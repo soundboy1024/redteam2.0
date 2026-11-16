@@ -1,0 +1,23 @@
+# Model sweep queue (CLAUDE.md 4.9). Models are tried in this order.
+# A tag that does not exist becomes a pull_failed record; the larger models are here
+# to produce "does not fit" records.
+models:
+  - llama3.2:1b
+  - gemma3:4b
+  - mistral:7b
+  - granite3.3:8b
+  - qwen3:8b
+  - deepseek-r1:8b
+  - hermes3:8b
+  - dolphin3:8b
+  - gemma3:12b
+  - mistral-nemo:12b
+  - phi4:14b
+  - qwen2.5:14b
+  - gpt-oss:20b
+# Free disk needed before a pull.
+min_free_disk_gb: 30
+# Free memory needed before a pull, and after the model is loaded.
+min_free_memory_gb: 6
+# A running batch is stopped when free memory falls under this.
+stop_free_memory_gb: 2

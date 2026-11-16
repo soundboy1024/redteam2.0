@@ -184,7 +184,8 @@ def page_run(s: dict) -> None:
         else:
             st.session_state["watch"] = batch_id.strip()
             del st.session_state["default_batch"]
-            st.success(f"Started {batch_id.strip()}. Console output: {console}")
+            # the path is shown as code: plain markdown drops the backslash before "_console"
+            st.success(f"Started {batch_id.strip()}. Console output: `{console}`")
     stoppable = bool(live and live[1] == "running" and live[3])
     confirm = b3.checkbox("I want to stop the running batch", key="confirm_stop",
                           disabled=not stoppable)
@@ -368,8 +369,10 @@ def page_inspect(s: dict) -> None:
         return
     labels = [f"{r['scenario_id']} | {r['model_name']} | t={_temp_text(r['temperature'])} | "
               f"rep {r['repetition_index']} | {r['cell']} | {r['run_id'][:8]}" for r in runs]
+    # the key carries the batch and the filter: the browser keeps the shown label per widget,
+    # so a changed run list needs a new widget or the box can name a run that is not shown
     pick = st.selectbox("Run", range(len(runs)), format_func=lambda i: labels[i],
-                        key="inspect_run")
+                        key=f"inspect_run|{batch_id}|{int(only)}")
     d = data.run_detail(s["db"], s["listener_db"], s["fixtures_root"], runs[pick]["run_id"])
     result = d["result"]
     if result is None:
