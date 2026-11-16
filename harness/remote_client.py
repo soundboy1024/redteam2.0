@@ -1,10 +1,11 @@
-"""Raw-HTTP clients for hosted models (Anthropic, Groq, Cerebras). No SDK.
+"""Raw-HTTP clients for hosted models (Anthropic, Groq, Cerebras, Google). No SDK.
 
 Must not import from traps/ or telemetry/. Every failure raises RemoteModelError.
 The API key is an argument; it is never logged and never put in an exception.
 Endpoints are fixed constants below; nothing about them is configurable.
 """
 import logging
+import re
 import time
 
 import requests
@@ -23,7 +24,17 @@ PROVIDERS = {
     "cerebras": {"chat_url": "https://api.cerebras.ai/v1/chat/completions",
                  "models_url": "https://api.cerebras.ai/v1/models",
                  "key_env": "CEREBRAS_API_KEY"},
+    # The model id is part of the URL path, so it is checked against GOOGLE_MODEL_ID_RE.
+    "google": {"chat_url": "https://generativelanguage.googleapis.com/v1beta/models/{model}"
+                           ":generateContent",
+               "models_url": "https://generativelanguage.googleapis.com/v1beta/models",
+               "key_env": "GOOGLE_API_KEY"},
 }
+GOOGLE_MODEL_ID_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*")
+# Google models that reject a temperature setting; they run once per repetition at the
+# provider default. Filled from a live check of each model in remote_models.
+GOOGLE_NO_TEMPERATURE_MODELS: tuple = ()
+_GOOGLE_STOP_REASONS = {"STOP": "stop", "MAX_TOKENS": "length"}
 ANTHROPIC_TEMPERATURE_MODELS = ("claude-haiku-4-5", "claude-sonnet-4-6", "claude-opus-4-6")
 ANTHROPIC_VERSION = "2023-06-01"
 MAX_ATTEMPTS = 5
@@ -55,6 +66,8 @@ def accepts_temperature(name: str) -> bool:
     provider, model_id = split_model(name)
     if provider == "anthropic":
         return model_id in ANTHROPIC_TEMPERATURE_MODELS
+    if provider == "google":
+        return model_id not in GOOGLE_NO_TEMPERATURE_MODELS
     return True
 
 
@@ -66,6 +79,8 @@ def _headers(provider: str, api_key: str) -> dict:
     if provider == "anthropic":
         return {"x-api-key": api_key, "anthropic-version": ANTHROPIC_VERSION,
                 "content-type": "application/json"}
+    if provider == "google":   # header, never the ?key= query parameter
+        return {"x-goog-api-key": api_key, "content-type": "application/json"}
     return {"Authorization": f"Bearer {api_key}", "content-type": "application/json"}
 
 
@@ -192,11 +207,96 @@ def _openai_reply(data, resp, provider: str, api_key: str) -> tuple[str, str, in
     return (content or "", finish, usage["completion_tokens"], usage["prompt_tokens"])
 
 
+def _google_body(messages: list[dict], temperature: float | None, seed: int,
+                 max_tokens: int) -> dict:
+    rest = list(messages)
+    body = {}
+    if rest and rest[0].get("role") == "system":
+        body["systemInstruction"] = {"parts": [{"text": rest[0]["content"]}]}
+        rest = rest[1:]
+    contents = []
+    for m in rest:
+        text = str(m.get("content", ""))
+        if m.get("role") == "assistant":
+            # An empty text part is rejected; the run log keeps the true empty reply.
+            contents.append({"role": "model",
+                             "parts": [{"text": text if text.strip()
+                                        else EMPTY_REPLY_PLACEHOLDER}]})
+        else:
+            contents.append({"role": "user", "parts": [{"text": text}]})
+    body["contents"] = contents
+    body["generationConfig"] = {"maxOutputTokens": max_tokens, "seed": seed}
+    if temperature is not None:
+        body["generationConfig"]["temperature"] = temperature
+    return body
+
+
+def _google_reply(data, resp, api_key: str) -> tuple[str, str, int, int | None]:
+    """Text parts only (thought parts are skipped). A blocked prompt or a candidate with
+    no content is an empty reply with Google's reason, not an error."""
+    p = "google"
+    if not isinstance(data, dict):
+        raise _bad(p, "is not a JSON object", resp, api_key)
+    usage = data.get("usageMetadata")
+    candidates = data.get("candidates")
+    if not isinstance(candidates, list) or not candidates:
+        # A blocked prompt reports no token counts (seen live), so none are required here.
+        feedback = data.get("promptFeedback")
+        reason = feedback.get("blockReason") if isinstance(feedback, dict) else None
+        if not isinstance(reason, str) or not reason:
+            raise _bad(p, "has no candidates and no promptFeedback.blockReason", resp, api_key)
+        prompt_tokens = usage.get("promptTokenCount") if isinstance(usage, dict) else None
+        if prompt_tokens is not None and not _is_count(prompt_tokens):
+            raise _bad(p, "has a usageMetadata.promptTokenCount that is not a count", resp,
+                       api_key)
+        return "", "blocked:" + reason.lower(), 0, prompt_tokens
+    if not isinstance(usage, dict) or not _is_count(usage.get("promptTokenCount")):
+        raise _bad(p, "lacks usageMetadata.promptTokenCount", resp, api_key)
+    out_tokens = 0
+    for field in ("candidatesTokenCount", "thoughtsTokenCount"):
+        value = usage.get(field, 0)
+        if not _is_count(value):
+            raise _bad(p, f"has a usageMetadata.{field} that is not a count", resp, api_key)
+        out_tokens += value
+    first = candidates[0]
+    finish = first.get("finishReason") if isinstance(first, dict) else None
+    if not isinstance(finish, str) or not finish:
+        raise _bad(p, "lacks candidates[0].finishReason", resp, api_key)
+    content = first.get("content")
+    parts = content.get("parts", []) if isinstance(content, dict) else []
+    if content is not None and not isinstance(content, dict) or not isinstance(parts, list):
+        raise _bad(p, "has candidate content that is not an object with a parts list",
+                   resp, api_key)
+    texts = []
+    for part in parts:
+        if not isinstance(part, dict):
+            raise _bad(p, "has a content part that is not an object", resp, api_key)
+        if "text" in part and not part.get("thought"):
+            if not isinstance(part["text"], str):
+                raise _bad(p, "has a text part without a text string", resp, api_key)
+            texts.append(part["text"])
+    return ("".join(texts), _GOOGLE_STOP_REASONS.get(finish, finish.lower()), out_tokens,
+            usage["promptTokenCount"])
+
+
 def chat(model_name: str, messages: list[dict], *, temperature: float | None, seed: int,
          max_tokens: int, timeout_s: int, api_key: str, sleep=time.sleep) -> ChatResult:
     provider, model_id = split_model(model_name)
     if provider is None:
         raise RemoteModelError(f"{model_name!r} is not a hosted model name")
+    if provider == "google":
+        if not GOOGLE_MODEL_ID_RE.fullmatch(model_id) or ".." in model_id:
+            raise RemoteModelError(f"google model id {model_id!r} may only use letters, "
+                                   "digits, dots, hyphens and underscores")
+        url = PROVIDERS["google"]["chat_url"].format(model=model_id)
+        resp, elapsed = _send("post", provider, url, api_key, timeout_s, sleep,
+                              body=_google_body(messages, temperature, seed, max_tokens))
+        content, done, tokens, prompt_tokens = _google_reply(
+            _json(resp, provider, api_key), resp, api_key)
+        return ChatResult(
+            content=content, logprobs=None, token_count=tokens, latency_ms=elapsed * 1000.0,
+            tokens_per_sec=tokens / elapsed if tokens and elapsed else None,
+            done_reason=done, prompt_token_count=prompt_tokens)
     if provider == "anthropic":
         rest = list(messages)
         body = {"model": model_id, "max_tokens": max_tokens}
@@ -229,10 +329,17 @@ def list_models(provider: str, api_key: str, timeout_s: int = 30,
                 sleep=time.sleep) -> list[str]:
     if provider not in PROVIDERS:
         raise RemoteModelError(f"unknown provider {provider!r}; known: {sorted(PROVIDERS)}")
-    params = {"limit": 1000} if provider == "anthropic" else None
+    params = {"anthropic": {"limit": 1000}, "google": {"pageSize": 1000}}.get(provider)
     resp, _ = _send("get", provider, PROVIDERS[provider]["models_url"], api_key, timeout_s,
                     sleep, params=params)
     data = _json(resp, provider, api_key)
+    if provider == "google":
+        items = data.get("models") if isinstance(data, dict) else None
+        if not isinstance(items, list) or not all(
+                isinstance(i, dict) and isinstance(i.get("name"), str) for i in items):
+            raise _bad(provider, "lacks a models list of objects with string names", resp,
+                       api_key)
+        return [i["name"].removeprefix("models/") for i in items]
     items = data.get("data") if isinstance(data, dict) else None
     if not isinstance(items, list) or not all(
             isinstance(i, dict) and isinstance(i.get("id"), str) for i in items):

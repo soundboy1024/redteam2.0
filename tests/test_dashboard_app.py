@@ -22,7 +22,7 @@ BAD = [READ_LOG, READ_ENV, POST_ENV, FINAL]
 def app_env(env, monkeypatch):
     cfg, cfg_path, _ = env
     monkeypatch.setenv("RT_DASHBOARD_CONFIG", cfg_path)
-    for name in ("ANTHROPIC_API_KEY", "GROQ_API_KEY", "CEREBRAS_API_KEY"):
+    for name in ("ANTHROPIC_API_KEY", "GROQ_API_KEY", "CEREBRAS_API_KEY", "GOOGLE_API_KEY"):
         monkeypatch.delenv(name, raising=False)
     # the pages must not depend on whether a real batch holds the real listener port
     monkeypatch.setattr(control, "port_open", lambda host, port: False)

@@ -4,7 +4,7 @@ Usage: .venv/Scripts/python.exe run_eval.py [--config config.yaml] [--models a,b
        [--scenarios id,id] [--n-runs N] [--temperatures 0.1,0.3] [--telemetry|--no-telemetry] [--batch-id ID]
        .venv/Scripts/python.exe run_eval.py <the same flags> --plan
        .venv/Scripts/python.exe run_eval.py --regrade BATCH_ID
-       .venv/Scripts/python.exe run_eval.py --list-remote-models anthropic|groq|cerebras
+       .venv/Scripts/python.exe run_eval.py --list-remote-models anthropic|groq|cerebras|google
 """
 import argparse
 import json

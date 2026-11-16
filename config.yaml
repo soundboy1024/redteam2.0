@@ -6,8 +6,9 @@ models:
   - gemma2:9b-instruct-q4_K_M
   - phi4-mini:latest
   - ministral-3:8b
-# Hosted models: <provider>/<model id>, provider one of anthropic, groq, cerebras.
-# Keys come from ANTHROPIC_API_KEY, GROQ_API_KEY, CEREBRAS_API_KEY in the environment.
+# Hosted models: <provider>/<model id>, provider one of anthropic, groq, cerebras, google.
+# Keys come from ANTHROPIC_API_KEY, GROQ_API_KEY, CEREBRAS_API_KEY, GOOGLE_API_KEY in the
+# environment.
 # The default batch (models) stays local-only; hosted models are chosen with --models.
 remote_models:
   - anthropic/claude-haiku-5-5
@@ -16,6 +17,10 @@ remote_models:
   - anthropic/claude-haiku-4-5
   - groq/openai/gpt-oss-120b
   - anthropic/claude-fable-5-2
+  - google/gemini-4-argon
+  - google/gemini-4-hydrogen
+  - google/gemini-4-carbon
+  - google/gemini-3.8-flash
 remote_max_tokens: 4096
 remote_timeout_s: 120
 n_runs: 3

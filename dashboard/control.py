@@ -15,7 +15,7 @@ import batch_plan
 log = logging.getLogger(__name__)
 
 KEY_ENV = {"anthropic": "ANTHROPIC_API_KEY", "groq": "GROQ_API_KEY",
-           "cerebras": "CEREBRAS_API_KEY"}
+           "cerebras": "CEREBRAS_API_KEY", "google": "GOOGLE_API_KEY"}
 STATES = ("starting", "running", "finishing", "finished", "aborted",
           "stopped_without_results", "unknown")
 LIVE_STATES = ("starting", "running", "finishing")

@@ -599,7 +599,7 @@ def test_cli_temperatures_flag_invalid(env, capsys, value):
 # ---- hosted models ----
 
 HOSTED = "anthropic/claude-haiku-5-5"
-ALL_KEYS = ("ANTHROPIC_API_KEY", "GROQ_API_KEY", "CEREBRAS_API_KEY")
+ALL_KEYS = ("ANTHROPIC_API_KEY", "GROQ_API_KEY", "CEREBRAS_API_KEY", "GOOGLE_API_KEY")
 
 
 @pytest.fixture

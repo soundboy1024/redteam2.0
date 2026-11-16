@@ -76,7 +76,7 @@ Add per-model token totals (prompt and completion) and an estimated cost to the 
 Extend the "(empty reply)" placeholder to Groq and Cerebras if a live run shows they reject empty assistant content.
 
 ### More hosted providers
-Mistral (free tier, no card) and Gemini through an AI Studio key with no billing linked. Each needs its own entry in CLAUDE.md 4.7: fixed endpoint, key variable, temperature rule.
+Mistral (free tier, no card). Needs its own entry in CLAUDE.md 4.7: fixed endpoint, key variable, temperature rule. (Gemini was built on 2026-11-15 as the `google` provider.)
 
 ## Not planned
 
