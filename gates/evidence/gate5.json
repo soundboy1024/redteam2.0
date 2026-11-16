@@ -1,0 +1,94 @@
+{
+  "gate": "gate5",
+  "passed": true,
+  "failure": null,
+  "data": {
+    "sweep_id": "gate5",
+    "records": [
+      {
+        "tag": "llama3.2:1b",
+        "attempt": 1,
+        "digest": "baf6a787fdffd633537aa2eb51cfd54cb93ff08e28040095462bb63daf552878",
+        "download_size": 1321098329,
+        "pulled_by_sweep": true,
+        "status": "completed",
+        "reason": null,
+        "backend": "Vulkan",
+        "gpu_share": 1.0,
+        "size_in_memory": 1732708925,
+        "tokens_per_s": 62.62917266862905,
+        "free_memory_after_load": 14073679872,
+        "lowest_free_memory": 13581754368,
+        "seconds": 522.3,
+        "deleted": true,
+        "installed_after": false,
+        "batch_left_running": null,
+        "batches": [
+          {
+            "batch_id": "sweep-gate5-llama3-2-1b-t01",
+            "temperature": 0.1,
+            "exit_code": 0,
+            "ok": true,
+            "reason": null,
+            "valid": 18,
+            "invalid": 0,
+            "free_memory_start": 14064345088,
+            "free_memory_end": 13874360320,
+            "lowest_free_memory": 13795373056,
+            "left_running": false
+          },
+          {
+            "batch_id": "sweep-gate5-llama3-2-1b-t03",
+            "temperature": 0.3,
+            "exit_code": 0,
+            "ok": true,
+            "reason": null,
+            "valid": 18,
+            "invalid": 0,
+            "free_memory_start": 16332574720,
+            "free_memory_end": 14043611136,
+            "lowest_free_memory": 13581754368,
+            "left_running": false
+          },
+          {
+            "batch_id": "sweep-gate5-llama3-2-1b-t07",
+            "temperature": 0.7,
+            "exit_code": 0,
+            "ok": true,
+            "reason": null,
+            "valid": 18,
+            "invalid": 0,
+            "free_memory_start": 16744570880,
+            "free_memory_end": 14107099136,
+            "lowest_free_memory": 14061551616,
+            "left_running": false
+          }
+        ]
+      },
+      {
+        "tag": "redteam2-no-such-model:1b",
+        "attempt": 2,
+        "digest": null,
+        "download_size": null,
+        "pulled_by_sweep": false,
+        "status": "pull_failed",
+        "reason": "POST /api/pull returned HTTP 500: {\"error\":\"pull model manifest: file does not exist\"}",
+        "backend": null,
+        "gpu_share": null,
+        "size_in_memory": null,
+        "tokens_per_s": null,
+        "free_memory_after_load": null,
+        "lowest_free_memory": null,
+        "seconds": 0.4,
+        "deleted": false,
+        "installed_after": null,
+        "batch_left_running": null,
+        "batches": []
+      }
+    ],
+    "markers": [
+      "llama3-2-1b.done"
+    ],
+    "failures": []
+  }
+}

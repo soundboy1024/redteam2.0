@@ -1,6 +1,6 @@
 # Session summary
 
-Last updated: 2026-11-15 (about 21:00 UTC). Branch: `phase4`, cut from `post-gate3` at `fb6d4c4`. Nothing pushed, nothing merged.
+Last updated: 2026-11-16 (about 02:00 UTC). Branch: `phase4`; `main` was fast-forwarded to it on the director's word. Remote: `github.com/soundboy1024/redteam2.0`, private for now, to be made public.
 
 This file is the running record of where the project stands. It is updated at the end of each block of work.
 
@@ -9,8 +9,8 @@ This file is the running record of where the project stands. It is updated at th
 - Phases 1 to 4 are built. Gates 1, 2 and 3 were re-run at head on 2026-11-15 (about 20:50 UTC) and pass; Gate 3 ran against `llama3.2:3b`.
 - The control panel and inspector (Phase 4, `CLAUDE.md` 4.8) are built: `run_dashboard.bat`, port 8503, three pages (Run, Results, Inspect a run).
 - **Gate 4 passed and the director signed it off on 2026-11-15.** Batch `gate4-qwen7b-llama31`, started from the Run page through the Chrome extension: 108 of 108 runs valid, not aborted. Evidence: `gates/evidence/gate4.txt`, `gate4.json` and two inspector screenshots.
-- **Phase 5 (model sweep, `CLAUDE.md` 4.9) is built but Gate 5 has not been run.** `sweep.py`, `sweep_record.py`, `sweep_probe.py`, `sweep_queue.yaml`, `gates/gate5.py`. Tested with fakes only: no model has been pulled or deleted by it yet. The read-only probes were checked against the real Ollama server. Not committed.
-- `README.md` written for a public repo. Not committed. There is no git remote yet.
+- **Phase 5 (model sweep, `CLAUDE.md` 4.9) is built. Gate 5 passed and the director confirmed it (2026-11-15).** The Gate 5 sweep pulled `llama3.2:1b`, ran three batches (54 valid runs), deleted it, recorded a tag that does not exist as `pull_failed`, and skipped the finished model on a second start. All 13 installed models were untouched. Evidence: `gates/evidence/gate5.txt`, `gate5.json`. The full 13-model sweep (`sweep_queue.yaml`) has the director's go-ahead and has not been started yet.
+- `README.md` is committed. The repository is on GitHub (private), all branches pushed; commits keep the director's Gmail address by their choice.
 - The Anthropic key in the user environment was replaced (checked 2026-11-15: different from the leaked key, and a live call works). Whether the old key was deleted in the Console is not known here.
 - The sweep had one independent review. Fixed from it: a pull that adds no new name claims nothing (a differently spelled tag could have led to deleting an installed model); an earlier attempt's claim needs the same digest; a batch that cannot be stopped keeps its model and stops the sweep; a batch with no valid run fails; batch id length is checked up front; paths are absolute. Left open (minor): a later attempt that fails early drops the earlier attempt's claim, so that model stays on disk; the memory watch loop has no time limit of its own; a `taskkill` that reports failure after the process is gone.
 - 1023 tests pass, 1 skipped. `scripts/check_rules.py` exits 0.
@@ -20,11 +20,11 @@ This file is the running record of where the project stands. It is updated at th
 
 1. **Memory (settled for now).** The director set `OLLAMA_MAX_LOADED_MODELS=1`; with it every load used Vulkan and the Gate 4 batch finished. New finding: the Ollama runner process grows during a batch (`llama3.1` was 6.2 GB when loaded and 13.95 GB after 54 runs; lowest free memory in the batch was 3.1 GB). That growth, not the load size, explains the overnight low-memory stops. A long batch or a sweep needs a periodic unload or a memory watch. History of this item: correction (2026-11-15, later the same day): an earlier version of this line said Ollama runs on the CPU. That was wrong. Ollama's log shows every layer on the GPU through Vulkan (AMD Radeon 880M, integrated). An integrated GPU has no memory of its own: its "16 GB" is the same 32 GB of system RAM, so a model costs RAM twice over (about 7.9 GB of shared GPU memory for `gemma2:9b` plus host buffers; the process showed 15.5 GB, about 14 GB for `llama3.1`), leaving under 3 GB free. One load of `llama3.1` at 01:41 picked the ROCm backend instead of Vulkan; the others picked Vulkan. Decide how to run the remaining local batches and the Gate 4 batch: close other programs first, lower `num_ctx` in `config.yaml` (changes the test conditions), set Ollama to one parallel request, or run smaller batches. Nothing local will be started until then.
 2. **Configurable tools.** A ruling on `CLAUDE.md` 4 ("only these three" tools) and section 8 (shell and database tools permanently out) before the configurable tool set in `BACKLOG.md` can be designed.
-3. **Gemini.** Whether the Google project behind `GOOGLE_API_KEY` has billing on.
+3. **Gemini.** Design approved 2026-11-15: a fourth hosted provider `google/<id>` with the key from `GOOGLE_API_KEY`. The key was checked and lists `gemini-4-argon`, `gemini-4-hydrogen`, `gemini-4-carbon` and `gemini-3.8-flash`, the four models the director wants run. Not built yet. Prices are not known here; the director has $60 of credit.
 4. **Replace the Anthropic key.** It was pasted into a fixture file (restored, never read by a run), was printed once in the Claude session transcript, and is still in an unreachable git object in `.git` (a leftover stash, local only, never pushed). `git gc --prune=now` removes that object together with about 28 other unreachable leftovers; it has not been run.
 5. **Cerebras.** Not called. Whether it bills the card after the $5 trial credit could not be confirmed.
 6. **Two-call replies.** Keep "reject" (recommended) or execute the first call and flag the reply. Haiku 4.5 hit this rule in 50 replies tonight (see below).
-7. **Merge** `phase4` (which contains `post-gate3`) into `main`.
+7. **Make the repository public** (the director's switch, or their word).
 
 ## Director decisions on record
 
@@ -41,6 +41,7 @@ This file is the running record of where the project stands. It is updated at th
 - 2026-11-15: Gate 4 signed off. Order after it: fix the two page bugs, model sweep, configurable tools; Gemini (key variable `GOOGLE_API_KEY`) any time after Gate 4.
 - 2026-11-15: two local models in one batch stays, with `OLLAMA_MAX_LOADED_MODELS=1`.
 - 2026-11-15: model sweep design approved (a separate script that drives `run_eval.py`); moved from the backlog into `CLAUDE.md` 4.9 and Phase 5.
+- 2026-11-15: Gate 5 confirmed. Gemini provider design approved. `main` fast-forwarded to `phase4`. Repository name `redteam2.0`, Gmail address kept.
 - 2026-11-15: the repository is to be made public (job search, not a business). A README was asked for.
 
 ## What changed on `phase4`
@@ -158,8 +159,9 @@ Limitations that apply to every result here: canary matching is exact string mat
 ## Still to do
 
 - Everything under "Waiting on the director".
-- Gate 5 (director gate): a two-entry sweep run twice, then `gates\gate5.py --sweep-id <id>`. Needs the director's word, because it downloads a model and runs three batches. Then the full 13-model sweep.
-- Remote repository: none yet. Before making it public: director's call on the commit email (all commits carry a personal address), merge `phase4` into `main`.
+- Full 13-model sweep: `.venv\Scripts\python.exe sweep.py --sweep-id <name>`.
+- Gemini provider, then batches for the four Google models.
+- Swept model result so far: `llama3.2:1b` completed 1 of 54 runs (49 failed clean, 4 failed compromised, all four in `indirect_injection_log`); batches `sweep-gate5-llama3-2-1b-t01`, `-t03`, `-t07`.
 - Hosted quota handling (`BACKLOG.md`, Tier 1b): resume, per-provider pause, clean stop on rate-limit storms, retry for Groq's HTTP 400.
 - Configurable tool set and the Gemini provider, in that order unless the director says otherwise.
 - Project hooks and permission allowlist in `.claude/settings.json`.
