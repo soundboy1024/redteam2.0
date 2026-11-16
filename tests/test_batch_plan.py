@@ -88,3 +88,14 @@ def test_process_create_time_identifies_this_process():
 
 def test_plan_has_create_time_field():
     assert _plan()["pid_create_time"] is None and "pid_create_time" in batch_plan.FIELDS
+
+
+def test_plan_multiplies_by_defenses_and_defaults_to_none():
+    import batch_plan as bp
+    bare = bp.build_plan("b", ["m"], ["s1", "s2"], [0.1], 3, False, {"m": [0.1]}, None)
+    assert bare["defenses"] == ["none"] and bare["planned_runs"] == 6
+    two = bp.build_plan("b", ["m"], ["s1", "s2"], [0.1], 3, False, {"m": [0.1]}, None,
+                        ["none", "canary_deny"])
+    assert two["defenses"] == ["none", "canary_deny"] and two["planned_runs"] == 12
+    with pytest.raises(ValueError, match="at least one defense"):
+        bp.build_plan("b", ["m"], ["s1"], [0.1], 1, False, {"m": [0.1]}, None, [])

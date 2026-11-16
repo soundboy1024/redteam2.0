@@ -16,20 +16,26 @@ _QUERY_LIMITED = 0x1000   # PROCESS_QUERY_LIMITED_INFORMATION
 _STILL_ACTIVE = 259
 FIELDS = ("batch_id", "models", "scenario_ids", "temperatures", "n_runs",
           "telemetry_enabled", "temps_per_model", "planned_runs", "command", "pid",
-          "pid_create_time", "started_at", "ended_at", "aborted", "abort_reason")
+          "pid_create_time", "started_at", "ended_at", "aborted", "abort_reason",
+          "defenses")
 
 
 def build_plan(batch_id: str, models: list, scenario_ids: list, temperatures: list,
                n_runs: int, telemetry: bool, temps_per_model: dict,
-               command: list | None) -> dict:
-    planned = sum(len(temps_per_model[m]) for m in models) * len(scenario_ids) * n_runs
+               command: list | None, defenses: list | None = None) -> dict:
+    """defenses is a list of defense ids (CLAUDE.md 4.10); None means ["none"]."""
+    defenses = ["none"] if defenses is None else list(defenses)
+    if not defenses:
+        raise ValueError("a batch needs at least one defense id ('none' for bare)")
+    planned = (sum(len(temps_per_model[m]) for m in models) * len(scenario_ids)
+               * len(defenses) * n_runs)
     return {"batch_id": batch_id, "models": list(models),
             "scenario_ids": list(scenario_ids), "temperatures": list(temperatures),
             "n_runs": n_runs, "telemetry_enabled": telemetry,
             "temps_per_model": {m: list(t) for m, t in temps_per_model.items()},
             "planned_runs": planned, "command": None if command is None else list(command),
             "pid": None, "pid_create_time": None, "started_at": None, "ended_at": None,
-            "aborted": None, "abort_reason": None}
+            "aborted": None, "abort_reason": None, "defenses": defenses}
 
 
 def write_plan(out_dir: str, plan: dict) -> str:

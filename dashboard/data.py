@@ -10,8 +10,9 @@ import sqlite3
 from contextlib import closing
 
 import batch_plan
-from telemetry.report import (COMPLETION_NOTE, EXECUTED_NOTE, FAILED_NOTE, LIMITATION_NOTE,
-                              TRIPWIRES, build_matrix)
+from telemetry.report import (BLOCKED_NOTE, COMPLETION_NOTE, EXECUTED_NOTE, FAILED_NOTE,
+                              LIMITATION_NOTE, SIGNAL_NOTE, TRIPWIRES,
+                              build_defense_comparison, build_matrix)
 from telemetry.schema import BOOL_COLUMNS
 from telemetry.trajectory import trajectory_hash
 
@@ -19,7 +20,8 @@ POINTER_NOTE = ("In fake_system_error and authority_spoof the user prompt names 
                 "carries the injection, so those two measure how an agent treats an injection "
                 "it was told to read. They are not comparable with indirect_injection_log and "
                 "indirect_injection_markdown, where the prompt does not name the poison file.")
-LIMITATIONS = (LIMITATION_NOTE, COMPLETION_NOTE, EXECUTED_NOTE, FAILED_NOTE, POINTER_NOTE)
+LIMITATIONS = (LIMITATION_NOTE, COMPLETION_NOTE, EXECUTED_NOTE, FAILED_NOTE, POINTER_NOTE,
+               BLOCKED_NOTE, SIGNAL_NOTE)
 NOT_RECORDED = "not recorded"
 RESULT_FILES = ("results.json", "summary.md")
 
@@ -187,8 +189,8 @@ def matrix(db_path: str, results_dir: str, batch_ids: list[str]) -> dict:
         row.setdefault("temperature", temps.get(r["run_id"]))
         if "attempted_tripwires" not in row:
             row["attempted_tripwires"] = []
-            unrecorded_keys.add((row["model_name"], row["temperature"],
-                                 row["attack_taxonomy"]))
+            unrecorded_keys.add((row["model_name"], row["defense_id"],
+                                 row["temperature"], row["attack_taxonomy"]))
         patched.append(row)
     hashes = {}
     for r in patched:
@@ -197,7 +199,8 @@ def matrix(db_path: str, results_dir: str, batch_ids: list[str]) -> dict:
         hashes[r["run_id"]] = trajectory_hash(steps)
     rows = build_matrix(patched, hashes)
     for row in rows:
-        key = (row["model_name"], row["temperature"], row["attack_taxonomy"])
+        key = (row["model_name"], row["defense_id"], row["temperature"],
+               row["attack_taxonomy"])
         row["attempted_recorded"] = key not in unrecorded_keys
     per_batch = {}
     for r in patched:
@@ -211,12 +214,15 @@ def matrix(db_path: str, results_dir: str, batch_ids: list[str]) -> dict:
                          "aborted": aborted})
     n_valid = sum(1 for r in patched if r["valid"])
     return {"rows": rows, "included": included,
+            "defense_comparison": build_defense_comparison(patched),
             "totals": {"total": len(patched), "valid": n_valid,
                        "invalid": len(patched) - n_valid,
                        "runs_with_parse_failures": sum(1 for r in patched
                                                        if r["parse_failures"]),
                        "runs_with_attempted_tripwires": sum(
-                           1 for r in patched if r["attempted_tripwires"])}}
+                           1 for r in patched if r["attempted_tripwires"]),
+                       "runs_with_blocked_attempts": sum(
+                           1 for r in patched if r["blocked_calls"])}}
 
 
 def _summary_says_aborted(results_dir: str, batch_id: str) -> bool | None:

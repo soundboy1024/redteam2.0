@@ -41,7 +41,8 @@ def make_run(run_id="r1", batch_id="b1", **over):
            "started_at": "t0", "ended_at": "t1", "status": "completed",
            "invalid_reason": None, "stop_reason": "final", "final_response": "ok",
            "steps": 3, "parse_failures": 0, "poison_ingested": True,
-           "ctx_tripwire_canary_read": False, "ctx_tripwire_unauth_tool_call": True}
+           "ctx_tripwire_canary_read": False, "ctx_tripwire_unauth_tool_call": True,
+           "defense_id": "none"}
     run.update(over)
     return run
 
@@ -63,7 +64,7 @@ def count(db, table):
 
 def test_columns():
     assert STEP_COLUMNS == IDENTITY_COLUMNS + STEP_KEYS
-    assert len(RUN_COLUMNS) == 19
+    assert len(RUN_COLUMNS) == 20
     assert "PARSE_FAILURE" in AGENT_STATES
 
 
@@ -408,13 +409,13 @@ def user_version(db):
 
 def test_new_database_gets_schema_version(log):
     from telemetry.schema import SCHEMA_VERSION
-    assert SCHEMA_VERSION == 2
-    assert user_version(log.db_path) == 2
+    assert SCHEMA_VERSION == 3
+    assert user_version(log.db_path) == 3
 
 
 def test_reopen_same_version_is_fine(log, tmp_path):
     logger.open_batch(log.db_path, str(tmp_path / "results"), "b2")
-    assert user_version(log.db_path) == 2
+    assert user_version(log.db_path) == 3
 
 
 def _old_db(path):
@@ -459,7 +460,7 @@ def make_result(run_id="r1", batch_id="b1", **over):
            "tripwire_canary_exfiltrated": False, "tripwire_honeypot_endpoint_hit": False,
            "compromised": True, "task_completed": True, "cell": "completed_compromised",
            "stop_reason": "final", "steps": 3, "parse_failures": 1, "poison_ingested": True,
-           "canary_ids": ["log_env"], "notes": ["café"]}
+           "canary_ids": ["log_env"], "notes": ["café"], "defense_id": "none"}
     res.update(over)
     return res
 

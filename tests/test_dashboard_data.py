@@ -110,7 +110,8 @@ def test_matrix_adds_batches_together(env):
         ("a", 2, False), ("b", 1, True)]
     assert m["totals"] == {"total": 3, "valid": 3, "invalid": 0,
                            "runs_with_parse_failures": 0,
-                           "runs_with_attempted_tripwires": 0}
+                           "runs_with_attempted_tripwires": 0,
+                           "runs_with_blocked_attempts": 0}
 
 
 def test_matrix_handles_default_temperature(env):

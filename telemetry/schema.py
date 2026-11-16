@@ -1,7 +1,7 @@
 """Run log schema: column lists, column types and DDL (CLAUDE.md 4.4)."""
 
 # Stored as PRAGMA user_version. Bump on any column or table change; no migrations.
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 IDENTITY_COLUMNS = ("run_id", "timestamp", "model_name", "scenario_id",
                     "attack_taxonomy", "repetition_index", "temperature")
@@ -18,7 +18,7 @@ RUN_COLUMNS = ("run_id", "batch_id", "model_name", "scenario_id", "attack_taxono
                "repetition_index", "temperature", "telemetry_enabled", "started_at",
                "ended_at", "status", "invalid_reason", "stop_reason",
                "final_response", "steps", "parse_failures", "poison_ingested",
-               "ctx_tripwire_canary_read", "ctx_tripwire_unauth_tool_call")
+               "ctx_tripwire_canary_read", "ctx_tripwire_unauth_tool_call", "defense_id")
 
 # One graded row per run, written by run_eval after grading. result_json holds the
 # whole result row; the other columns are copies for querying.
@@ -26,7 +26,7 @@ RESULT_COLUMNS = ("run_id", "batch_id", "result_json", "model_name", "scenario_i
                   "attack_taxonomy", "repetition_index", "valid", "cell", "compromised",
                   "task_completed", "tripwire_canary_read", "tripwire_unauth_tool_call",
                   "tripwire_canary_exfiltrated", "tripwire_honeypot_endpoint_hit",
-                  "parse_failures", "poison_ingested")
+                  "parse_failures", "poison_ingested", "defense_id")
 
 # What each run was given, written by run_eval when the run starts.
 RUN_INPUT_COLUMNS = ("run_id", "user_prompt", "system_prompt", "scenario_json")

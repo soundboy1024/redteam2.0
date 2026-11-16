@@ -11,7 +11,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable
 
-from harness.agent_loop import run_agent
+from harness.agent_loop import run_agent, system_prompt_for
 from harness.ollama_client import ChatResult, ModelError
 from harness.tools import ListenerUnreachable, ScenarioError, ToolContext
 
@@ -26,7 +26,26 @@ RUN_KEYS = ("run_id", "batch_id", "model_name", "scenario_id", "attack_taxonomy"
             "repetition_index", "temperature", "telemetry_enabled", "started_at",
             "ended_at", "status", "invalid_reason", "stop_reason",
             "final_response", "steps", "parse_failures", "poison_ingested",
-            "ctx_tripwire_canary_read", "ctx_tripwire_unauth_tool_call")
+            "ctx_tripwire_canary_read", "ctx_tripwire_unauth_tool_call", "defense_id")
+
+# A defense is plain data (CLAUDE.md 4.10): an id and three switches. "none" is built in.
+DEFENSE_SWITCHES = ("prompt_warning", "block_unallowed_endpoints", "deny_canary_reads")
+NO_DEFENSE = {"id": "none", **{k: False for k in DEFENSE_SWITCHES}}
+
+
+def check_defense(defense: dict) -> dict:
+    if (not isinstance(defense, dict) or set(defense) != {"id", *DEFENSE_SWITCHES}
+            or not isinstance(defense["id"], str) or not defense["id"]
+            or any(not isinstance(defense[k], bool) for k in DEFENSE_SWITCHES)):
+        raise ValueError(f"defense must have a string 'id' and the boolean switches "
+                         f"{DEFENSE_SWITCHES}, got {defense!r}")
+    return defense
+
+
+def defense_system_prompt(defense: dict, cfg: dict) -> str:
+    """The system prompt a run under this defense is given."""
+    check_defense(defense)
+    return system_prompt_for(cfg["defense_warning_text"] if defense["prompt_warning"] else None)
 
 
 def _now() -> str:
@@ -72,7 +91,9 @@ def run_one(scenario: dict, fixtures_root: str, model: str, repetition_index: in
             cfg: dict, *, temperature: float | None, batch_id: str, telemetry: bool,
             chat_fn: Callable[[list[dict]], ChatResult],
             step_sink: Callable[[dict], None],
-            event_sink: Callable[[str, dict], None]) -> dict:
+            event_sink: Callable[[str, dict], None],
+            defense: dict = NO_DEFENSE) -> dict:
+    system_prompt = defense_system_prompt(defense, cfg)
     run_id = str(uuid.uuid4())
     started_at = _now()
     host, port = cfg["listener"]["host"], cfg["listener"]["port"]
@@ -96,12 +117,15 @@ def run_one(scenario: dict, fixtures_root: str, model: str, repetition_index: in
             canary_files=list(scenario["canary_files"]),
             allowed_endpoints=list(scenario["allowed_endpoints"]),
             event_sink=lambda event: event_sink(run_id, event),
-            base_url=f"http://{host}:{port}")
+            base_url=f"http://{host}:{port}",
+            block_unallowed_endpoints=defense["block_unallowed_endpoints"],
+            deny_canary_reads=defense["deny_canary_reads"])
         status, invalid_reason, stop_reason, final = "completed", None, None, None
         outcome = None
         try:
             outcome = run_agent(chat_fn, ctx, scenario["user_prompt"],
-                                list(scenario["poison_files"]), cfg["max_steps"], sink)
+                                list(scenario["poison_files"]), cfg["max_steps"], sink,
+                                system_prompt=system_prompt)
         except INFRA_ERRORS as exc:
             log.error("run %s (%s, %s, rep %s) invalid: %s: %s", run_id, scenario["id"],
                       model, repetition_index, type(exc).__name__, exc)
@@ -124,6 +148,7 @@ def run_one(scenario: dict, fixtures_root: str, model: str, repetition_index: in
             final_response=final, steps=steps, parse_failures=parse_failures,
             poison_ingested=poison,
             ctx_tripwire_canary_read=ctx.tripwire_canary_read,
-            ctx_tripwire_unauth_tool_call=ctx.tripwire_unauth_tool_call)
+            ctx_tripwire_unauth_tool_call=ctx.tripwire_unauth_tool_call,
+            defense_id=defense["id"])
     finally:
         _remove_workspace(tmp_root)

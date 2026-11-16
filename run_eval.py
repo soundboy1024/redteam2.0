@@ -1,7 +1,8 @@
 """Batch CLI: wires harness, listener process, run log, grader and results writer.
 
 Usage: .venv/Scripts/python.exe run_eval.py [--config config.yaml] [--models a,b]
-       [--scenarios id,id] [--n-runs N] [--temperatures 0.1,0.3] [--telemetry|--no-telemetry] [--batch-id ID]
+       [--scenarios id,id] [--n-runs N] [--temperatures 0.1,0.3] [--defenses none,id]
+       [--telemetry|--no-telemetry] [--batch-id ID]
        .venv/Scripts/python.exe run_eval.py <the same flags> --plan
        .venv/Scripts/python.exe run_eval.py --regrade BATCH_ID
        .venv/Scripts/python.exe run_eval.py --list-remote-models anthropic|groq|cerebras|google
@@ -21,10 +22,9 @@ import batch_plan
 from batch_results import (LogWriteError, grade_and_store_run,
                            write_batch_results)
 from harness import ollama_client, remote_client
-from harness.agent_loop import SYSTEM_PROMPT
-from harness.runner import load_scenarios, run_one
+from harness.runner import NO_DEFENSE, defense_system_prompt, load_scenarios, run_one
 from listener_proc import start_listener, stop_listener
-from rt_config import ConfigError, load_config
+from rt_config import ConfigError, load_config, resolve_defenses
 from telemetry.logger import (JSONL_FILES, check_new_batch_id, existing_batch, log_run, log_run_inputs,
                               log_step, log_tool_event, open_batch, read_result_rows,
                               read_runs, read_step_run_ids)
@@ -55,6 +55,7 @@ class PreparedBatch:
     temperatures: list
     factory: Callable
     fixtures_root: str
+    defenses: list          # defense entries (dicts), in run order
 
 
 def temperatures_for(model: str, temperatures: list) -> list:
@@ -138,8 +139,11 @@ def prepare_batch(cfg: dict, models: list[str], scenario_ids: list[str], n_runs:
                   *, temperatures: list, config_path: str,
                   scenarios_path: str = SCENARIOS_PATH,
                   fixtures_root: str = FIXTURES_ROOT,
-                  command: list | None = None) -> PreparedBatch:
+                  command: list | None = None,
+                  defense_ids: list | None = None) -> PreparedBatch:
     """Config check and batch opening: everything that may fail before a run starts."""
+    defense_ids = [NO_DEFENSE["id"]] if defense_ids is None else list(defense_ids)
+    defenses = resolve_defenses(cfg, defense_ids)  # ValueError before anything opens
     file_cfg = load_config(config_path)
     for key in ("canaries", "listener"):
         if file_cfg[key] != cfg[key]:
@@ -152,17 +156,19 @@ def prepare_batch(cfg: dict, models: list[str], scenario_ids: list[str], n_runs:
     # Before anything is launched, so a bad or reused batch id fails first.
     batch_log = open_batch(cfg["db_path"], cfg["results_dir"], batch_id)
     batch_plan.write_plan(batch_log.out_dir, _plan(
-        batch_id, models, scenario_ids, temperatures, n_runs, telemetry, command))
+        batch_id, models, scenario_ids, temperatures, n_runs, telemetry, command,
+        defense_ids))
     return PreparedBatch(cfg, config_path, batch_log, scenarios, chosen, list(models),
                          list(scenario_ids), n_runs, telemetry, list(temperatures), factory,
-                         fixtures_root)
+                         fixtures_root, defenses)
 
 
 def _plan(batch_id: str, models: list, scenario_ids: list, temperatures: list,
-          n_runs: int, telemetry: bool, command: list | None) -> dict:
+          n_runs: int, telemetry: bool, command: list | None,
+          defense_ids: list | None = None) -> dict:
     return batch_plan.build_plan(
         batch_id, models, scenario_ids, temperatures, n_runs, telemetry,
-        {m: temperatures_for(m, temperatures) for m in models}, command)
+        {m: temperatures_for(m, temperatures) for m in models}, command, defense_ids)
 
 
 def _run_all(prep: PreparedBatch, state: dict) -> None:
@@ -174,7 +180,8 @@ def _run_all(prep: PreparedBatch, state: dict) -> None:
     def log_inputs(run_id: str) -> None:  # once per run, before its first row
         if run_id not in inputs_logged:
             sc = current["scenario"]
-            log_run_inputs(batch_log, run_id, sc["user_prompt"], SYSTEM_PROMPT, sc)
+            log_run_inputs(batch_log, run_id, sc["user_prompt"],
+                           defense_system_prompt(current["defense"], cfg), sc)
             inputs_logged.add(run_id)
 
     def step(row: dict) -> None:
@@ -190,28 +197,31 @@ def _run_all(prep: PreparedBatch, state: dict) -> None:
     consecutive = 0
     for model in prep.models:
         for scenario in prep.chosen:
-            for temperature in temperatures_for(model, prep.temperatures):
-                for rep in range(prep.n_runs):
-                    current["scenario"] = scenario
-                    rec = run_one(scenario, prep.fixtures_root, model, rep, cfg,
-                                  temperature=temperature,
-                                  batch_id=batch_log.batch_id, telemetry=prep.telemetry,
-                                  chat_fn=prep.factory(model, rep, temperature),
-                                  step_sink=step_sink, event_sink=event_sink)
-                    record_run(rec)
-                    state["recorded"] += 1
-                    # Stored now, so a live view has a grade to show (CLAUDE.md 4.8).
-                    # An invalid run waits for the end of the batch: after a listener
-                    # fault its listener row can still land late, and a stored row is
-                    # never corrected.
-                    if rec["status"] != "invalid":
-                        grade_and_store_run(cfg, batch_log, prep.scenarios, rec["run_id"])
-                    consecutive = consecutive + 1 if rec["status"] == "invalid" else 0
-                    if consecutive >= cfg["max_consecutive_invalid"]:
-                        log.error("aborting batch %s: %d consecutive invalid runs",
-                                  batch_log.batch_id, consecutive)
-                        state["aborted"], state["abort_reason"] = True, CONSECUTIVE_INVALID
-                        return
+            for defense, temperature, rep in (
+                    (d, t, r) for d in prep.defenses
+                    for t in temperatures_for(model, prep.temperatures)
+                    for r in range(prep.n_runs)):
+                current["scenario"], current["defense"] = scenario, defense
+                rec = run_one(scenario, prep.fixtures_root, model, rep, cfg,
+                              temperature=temperature,
+                              batch_id=batch_log.batch_id, telemetry=prep.telemetry,
+                              chat_fn=prep.factory(model, rep, temperature),
+                              step_sink=step_sink, event_sink=event_sink,
+                              defense=defense)
+                record_run(rec)
+                state["recorded"] += 1
+                # Stored now, so a live view has a grade to show (CLAUDE.md 4.8).
+                # An invalid run waits for the end of the batch: after a listener
+                # fault its listener row can still land late, and a stored row is
+                # never corrected.
+                if rec["status"] != "invalid":
+                    grade_and_store_run(cfg, batch_log, prep.scenarios, rec["run_id"])
+                consecutive = consecutive + 1 if rec["status"] == "invalid" else 0
+                if consecutive >= cfg["max_consecutive_invalid"]:
+                    log.error("aborting batch %s: %d consecutive invalid runs",
+                              batch_log.batch_id, consecutive)
+                    state["aborted"], state["abort_reason"] = True, CONSECUTIVE_INVALID
+                    return
 
 
 def _stop(proc, error: BaseException | None) -> Exception | None:
@@ -252,6 +262,7 @@ def execute_batch(prep: PreparedBatch) -> dict:
     meta = {"batch_id": batch_log.batch_id, "models": prep.models,
             "scenario_ids": prep.scenario_ids, "n_runs": prep.n_runs,
             "temperatures": prep.temperatures, "telemetry_enabled": prep.telemetry,
+            "defenses": [d["id"] for d in prep.defenses],
             "hosted_models": [m for m in prep.models
                               if remote_client.split_model(m)[0] is not None],
             "models_without_temperature": [m for m in prep.models
@@ -285,11 +296,13 @@ def run_batch(cfg: dict, models: list[str], scenario_ids: list[str], n_runs: int
               telemetry: bool, batch_id: str, chat_fn_factory: Callable | None = None,
               *, temperatures: list, config_path: str,
               scenarios_path: str = SCENARIOS_PATH,
-              fixtures_root: str = FIXTURES_ROOT) -> dict:
+              fixtures_root: str = FIXTURES_ROOT,
+              defense_ids: list | None = None) -> dict:
     return execute_batch(prepare_batch(
         cfg, models, scenario_ids, n_runs, telemetry, batch_id, chat_fn_factory,
         temperatures=temperatures, config_path=config_path,
-        scenarios_path=scenarios_path, fixtures_root=fixtures_root))
+        scenarios_path=scenarios_path, fixtures_root=fixtures_root,
+        defense_ids=defense_ids))
 
 
 REGRADE_STOPPED = "regraded after the batch stopped early"
@@ -310,6 +323,7 @@ def _regrade_meta(batch_id: str, runs: list[dict], plan: dict | None) -> dict:
     if plan is not None:
         base = {k: plan[k] for k in ("models", "scenario_ids", "n_runs", "temperatures",
                                      "telemetry_enabled")}
+        base["defenses"] = plan.get("defenses") or _distinct(r["defense_id"] for r in runs)
         if plan.get("aborted"):
             aborted, reason = True, plan.get("abort_reason")
         elif plan["planned_runs"] == len(runs):
@@ -321,7 +335,8 @@ def _regrade_meta(batch_id: str, runs: list[dict], plan: dict | None) -> dict:
                 "scenario_ids": _distinct(r["scenario_id"] for r in runs),
                 "n_runs": max(r["repetition_index"] for r in runs) + 1,
                 "temperatures": _distinct(r["temperature"] for r in runs),
-                "telemetry_enabled": runs[0]["telemetry_enabled"]}
+                "telemetry_enabled": runs[0]["telemetry_enabled"],
+                "defenses": _distinct(r["defense_id"] for r in runs)}
         aborted, reason = True, REGRADE_UNKNOWN
     models = base["models"]
     return {"batch_id": batch_id, **base,
@@ -414,6 +429,8 @@ def _parser() -> argparse.ArgumentParser:
     p.add_argument("--scenarios", help="comma list of scenario ids; default all")
     p.add_argument("--n-runs", type=int)
     p.add_argument("--temperatures", help="comma list, each 0 to 2; default from config")
+    p.add_argument("--defenses", help="comma list of defense ids from config; each scenario "
+                                      "runs under each; default none (CLAUDE.md 4.10)")
     p.add_argument("--telemetry", dest="telemetry", action="store_true", default=None)
     p.add_argument("--no-telemetry", dest="telemetry", action="store_false")
     p.add_argument("--batch-id", default=None)
@@ -520,6 +537,11 @@ def main(argv: list[str] | None = None) -> int:
                         else _parse_temperatures(args.temperatures))
     except ValueError as exc:
         return _fail(str(exc))
+    defense_ids = [NO_DEFENSE["id"]] if args.defenses is None else _csv(args.defenses)
+    try:
+        resolve_defenses(cfg, defense_ids)
+    except ValueError as exc:
+        return _fail(f"--defenses: {exc}")
     telemetry = cfg["telemetry_enabled"] if args.telemetry is None else args.telemetry
     problem = hosted_problem(models, telemetry, os.environ)
     if problem:
@@ -533,12 +555,12 @@ def main(argv: list[str] | None = None) -> int:
         except ValueError as exc:
             return _fail(str(exc))
         print(json.dumps(_plan(batch_id, models, scenario_ids, temperatures, n_runs,
-                               telemetry, command)))
+                               telemetry, command, defense_ids)))
         return 0
     try:
         prep = prepare_batch(cfg, models, scenario_ids, n_runs, telemetry, batch_id,
                              temperatures=temperatures, config_path=args.config,
-                             command=command)
+                             command=command, defense_ids=defense_ids)
     except ValueError as exc:
         return _fail(str(exc))
     try:

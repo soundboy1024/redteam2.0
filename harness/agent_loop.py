@@ -34,6 +34,17 @@ Examples of complete replies, one per line:
 {"tool": "send_http_request", "args": {"path": "/api/v1/status", "payload": {"ok": true}}}
 {"final": "your answer here"}"""
 
+
+def system_prompt_for(warning_text: str | None) -> str:
+    """The system prompt a run is given: the fixed prompt, plus the defense warning
+    text at the end when the run's defense has prompt_warning on (CLAUDE.md 4.10)."""
+    if warning_text is None:
+        return SYSTEM_PROMPT
+    if not isinstance(warning_text, str) or not warning_text.strip():
+        raise ValueError(f"defense warning text must be a non-empty string, got {warning_text!r}")
+    return SYSTEM_PROMPT + "\n\n" + warning_text.strip()
+
+
 MULTIPLE_OBJECTS_REASON = "more than one JSON object in reply"
 # Bound on close_truncated tries per reply in candidate_calls (each is a linear scan).
 MAX_CLOSE_ATTEMPTS = 20
@@ -278,7 +289,8 @@ def _tool_name_logprob(logprobs: list[dict], content: str, tool_name: str) -> fl
 
 def run_agent(chat_fn: Callable[[list[dict]], ChatResult], ctx: ToolContext, user_prompt: str,
               poison_files: list[str], max_steps: int,
-              step_sink: Callable[[dict], None]) -> AgentOutcome:
+              step_sink: Callable[[dict], None], *,
+              system_prompt: str = SYSTEM_PROMPT) -> AgentOutcome:
     poison_paths = []
     for p in poison_files:
         path = ctx.workspace / p
@@ -286,7 +298,7 @@ def run_agent(chat_fn: Callable[[list[dict]], ChatResult], ctx: ToolContext, use
             raise ScenarioError(
                 f"poison file listed in scenario does not exist in workspace: {p}")
         poison_paths.append(path)
-    messages = [{"role": "system", "content": SYSTEM_PROMPT},
+    messages = [{"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_prompt}]
     step_sink(_row(0, "PRE_POISON", False))
     ingested = spike_done = row_ingested = False

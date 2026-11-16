@@ -1,16 +1,20 @@
 """Config loader: reads config.yaml and fails loudly on anything malformed."""
 import math
+import re
 
 import yaml
 
 from harness.remote_client import PROVIDERS, split_model
+from harness.runner import DEFENSE_SWITCHES, NO_DEFENSE
 
 REQUIRED_KEYS = (
     "ollama_host", "models", "n_runs", "temperatures", "telemetry_enabled",
     "max_steps", "listener", "db_path", "listener_db_path", "canaries",
     "num_ctx", "num_predict", "ollama_timeout_s", "results_dir",
     "max_consecutive_invalid", "remote_models", "remote_max_tokens", "remote_timeout_s",
+    "defenses", "defense_warning_text",
 )
+_DEFENSE_ID = re.compile(r"[a-z0-9_]{1,40}")
 CANARY_FIELDS = ("id", "fixture", "file", "token")
 
 
@@ -47,6 +51,50 @@ def _check_remote(cfg: dict, path: str) -> None:
             raise ConfigError(f"{path}: {key} must be a positive integer, got {v!r}")
 
 
+def _check_defenses(cfg: dict, path: str) -> None:
+    text = cfg["defense_warning_text"]
+    if not isinstance(text, str) or not text.strip():
+        raise ConfigError(f"{path}: defense_warning_text must be a non-empty string")
+    defenses = cfg["defenses"]
+    if not isinstance(defenses, list):
+        raise ConfigError(f"{path}: defenses must be a list, got {defenses!r}")
+    seen = set()
+    for i, d in enumerate(defenses):
+        if not isinstance(d, dict) or set(d) != {"id", *DEFENSE_SWITCHES}:
+            raise ConfigError(f"{path}: defenses[{i}] must have exactly the keys id, "
+                              f"{', '.join(DEFENSE_SWITCHES)}; got {d!r}")
+        if not isinstance(d["id"], str) or not _DEFENSE_ID.fullmatch(d["id"]):
+            raise ConfigError(f"{path}: defenses[{i}] id {d['id']!r} must be lower-case "
+                              "letters, digits and underscores")
+        if d["id"] == NO_DEFENSE["id"]:
+            raise ConfigError(f"{path}: defenses[{i}]: the id 'none' is built in and "
+                              "cannot be redefined")
+        if d["id"] in seen:
+            raise ConfigError(f"{path}: defenses has a duplicate id {d['id']!r}")
+        seen.add(d["id"])
+        for switch in DEFENSE_SWITCHES:
+            if not isinstance(d[switch], bool):
+                raise ConfigError(f"{path}: defenses[{i}] ({d['id']}): {switch} must be "
+                                  f"true or false, got {d[switch]!r}")
+        if not any(d[switch] for switch in DEFENSE_SWITCHES):
+            raise ConfigError(f"{path}: defenses[{i}] ({d['id']}) turns nothing on; "
+                              "use the built-in 'none' for that")
+
+
+def resolve_defenses(cfg: dict, ids: list[str]) -> list[dict]:
+    """The defense entries for a list of ids, in the order given. 'none' is built in.
+    Raises ValueError on an empty list, an unknown id or a duplicate."""
+    known = {NO_DEFENSE["id"]: NO_DEFENSE, **{d["id"]: d for d in cfg["defenses"]}}
+    if not ids:
+        raise ValueError("no defense given; use 'none' to run without one")
+    unknown = [i for i in ids if i not in known]
+    if unknown:
+        raise ValueError(f"unknown defense(s) {unknown}; known: {list(known)}")
+    if len(set(ids)) != len(ids):
+        raise ValueError(f"defenses has duplicates: {ids}")
+    return [dict(known[i]) for i in ids]
+
+
 def load_config(path: str) -> dict:
     try:
         with open(path, encoding="utf-8") as f:
@@ -65,6 +113,7 @@ def load_config(path: str) -> dict:
             raise ConfigError(f"{path}: missing required key '{key}'")
     _check_temperatures(cfg["temperatures"], path)
     _check_remote(cfg, path)
+    _check_defenses(cfg, path)
     listener = cfg["listener"]
     if not isinstance(listener, dict):
         raise ConfigError("listener: must be a mapping")

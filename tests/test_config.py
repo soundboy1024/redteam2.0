@@ -159,3 +159,66 @@ def test_remote_numbers_validated(tmp_path, key, value):
     cfg[key] = value
     with pytest.raises(ConfigError, match=key):
         load_config(_write(tmp_path, cfg))
+
+
+# ---- defenses (CLAUDE.md 4.10) ----
+
+def _cfg_with(tmp_path, **over):
+    import yaml
+    from rt_config import load_config as _load
+    cfg = dict(_load("config.yaml"), **over)
+    path = tmp_path / "c.yaml"
+    path.write_text(yaml.safe_dump(cfg), encoding="utf-8")
+    return str(path)
+
+
+def test_shipped_config_has_three_single_switch_defenses():
+    from rt_config import load_config as _load, resolve_defenses
+    cfg = _load("config.yaml")
+    assert [d["id"] for d in cfg["defenses"]] == ["prompt_warning", "endpoint_block",
+                                                  "canary_deny"]
+    assert all(sum(v is True for v in d.values()) == 1 for d in cfg["defenses"])
+    got = resolve_defenses(cfg, ["canary_deny", "none"])
+    assert [d["id"] for d in got] == ["canary_deny", "none"]
+    assert got[1] == {"id": "none", "prompt_warning": False,
+                      "block_unallowed_endpoints": False, "deny_canary_reads": False}
+
+
+def test_warning_text_names_no_trap_canary_or_scenario():
+    import json as _json
+    from rt_config import load_config as _load
+    cfg = _load("config.yaml")
+    low = cfg["defense_warning_text"].lower()
+    scenarios = _json.load(open("traps/scenarios.json", encoding="utf-8"))
+    words = ["/exfil", "/auth-verify", "/admin-debug", ".env", "credentials", "canary"]
+    words += [s["id"] for s in scenarios] + [c["token"].lower() for c in cfg["canaries"]]
+    assert not [w for w in words if w in low]
+
+
+GOOD_DEFENSE = {"id": "x", "prompt_warning": True, "block_unallowed_endpoints": False,
+                "deny_canary_reads": False}
+
+
+@pytest.mark.parametrize("over,needle", [
+    ({"defenses": "nope"}, "defenses must be a list"),
+    ({"defenses": [dict(GOOD_DEFENSE, id="none")]}, "built in"),
+    ({"defenses": [GOOD_DEFENSE, GOOD_DEFENSE]}, "duplicate id"),
+    ({"defenses": [dict(GOOD_DEFENSE, id="Bad Id")]}, "lower-case"),
+    ({"defenses": [dict(GOOD_DEFENSE, prompt_warning="yes")]}, "must be true or false"),
+    ({"defenses": [dict(GOOD_DEFENSE, prompt_warning=False)]}, "turns nothing on"),
+    ({"defenses": [{"id": "x", "prompt_warning": True}]}, "exactly the keys"),
+    ({"defenses": [dict(GOOD_DEFENSE, extra=True)]}, "exactly the keys"),
+    ({"defense_warning_text": "  "}, "defense_warning_text"),
+])
+def test_bad_defense_config_is_refused(tmp_path, over, needle):
+    from rt_config import ConfigError as _Err, load_config as _load
+    with pytest.raises(_Err, match=needle):
+        _load(_cfg_with(tmp_path, **over))
+
+
+@pytest.mark.parametrize("ids,needle", [([], "no defense given"), (["zz"], "unknown defense"),
+                                        (["none", "none"], "duplicates")])
+def test_resolve_defenses_refuses(ids, needle):
+    from rt_config import load_config as _load, resolve_defenses
+    with pytest.raises(ValueError, match=needle):
+        resolve_defenses(_load("config.yaml"), ids)

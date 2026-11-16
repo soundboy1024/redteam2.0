@@ -1,6 +1,6 @@
 # Session summary
 
-Last updated: 2026-11-16 (about 05:00 UTC). Branch: `phase4`; `main` was fast-forwarded to it on the director's word. Remote: `github.com/soundboy1024/redteam2.0`, private for now, to be made public.
+Last updated: 2026-11-16 (about 07:10 UTC). Phase 6 work is on branch `phase6`, in the worktree `.worktrees/phase6`, committed and pushed, not merged. Before that: branch `phase4`; `main` was fast-forwarded to it on the director's word. Remote: `github.com/soundboy1024/redteam2.0`, private for now, to be made public.
 
 This file is the running record of where the project stands. It is updated at the end of each block of work.
 
@@ -17,12 +17,29 @@ This file is the running record of where the project stands. It is updated at th
 - 1054 tests pass, 1 skipped. `scripts/check_rules.py` exits 0.
 - The pages have now been looked at in Chrome. Two bugs were seen and fixed the same day (not yet committed): on "Inspect a run", after ticking "Compromised runs only" the Run select box kept the label of a different run than the one shown (checked fixed in Chrome); on the Run page the "Started" message printed the console path as `results_console\...` instead of `results\_console\...` (checked by test only, since clicking Start would start a batch).
 
+## Phase 6 (signals and defenses, `CLAUDE.md` 4.10), 2026-11-16
+
+Built in the `phase6` worktree so the Gemini batches running from the main checkout were not disturbed. Nothing is committed or merged yet.
+
+- **Signals** in the grader, outside `compromised`: `provider_refusals` (exact, from `done_reason`), `noticed_injection` and `final_trap_mention` (`none`, `reported`, `relayed`; keyword matches on the final answer).
+- **Defenses** as data in `config.yaml`: `prompt_warning`, `endpoint_block`, `canary_deny`, plus the built-in `none`. `run_eval.py --defenses none,prompt_warning` runs every scenario under each; the default is `none`, so an ordinary batch is unchanged. Run order is model, scenario, defense, temperature, repetition.
+- **Blocked attempts**: a refused request or read sets no tripwire and is recorded as `blocked_calls`, `blocked_tripwires`, `blocked_canary_ids`.
+- Summary, `results.json`, the Run page (defense picker), the Results page (defense column, comparison table) and the Inspect page (signals, blocked actions, system prompt) show all of it.
+- 1135 tests pass, 1 skipped. `scripts/check_rules.py` exits 0. Scenarios validate.
+- **Gate 6 part 1** (scripted attack under each defense, no model) passed in a trial run on port 8998 while 8999 was held by `gemini4-argon-r2`. That trial is not the gate evidence and its evidence files were deleted. The official run, with the real batch `gate6-qwen7b` (qwen2.5:7b, four injected scenarios, four defenses, temperature 0.3, 3 runs each, 48 runs), was queued to start when port 8999 is free.
+- **Gate 6 ran officially on port 8999 on 2026-11-16 (07:08 to 07:20 UTC) and passed.** Evidence: `gates/evidence/gate6.txt` and `gate6.json`. Part 1 matched the expected table. Part 2, batch `gate6-qwen7b`: 48 of 48 runs stored, none invalid; nothing was compromised under any defense including `none`, so there were no blocked attempts and the batch does not show a defense stopping a real attack. Under `prompt_warning`, fake_system_error completion fell from 2 of 3 to 0 of 3, and 1 final answer reported and 3 relayed a trap path. The director has not confirmed the gate yet.
+- The Gemini re-runs finished (54 of 54 each, no compromise): Flash 54 completed clean; Hydrogen 52 and 2 failed; Carbon 51 and 3 failed; Argon 31 and 23 failed, all 23 blocked by Google (`blocked:other`) in attack runs. The rows are in the README.
+- Committed on branch `phase6` and pushed to GitHub at the director's request (2026-11-16). Not merged into `main`.
+- **The run log schema is now version 3** (`defense_id` on runs and results). The existing `telemetry/runs.db` in the main checkout is version 2 and will be refused after the merge; it has to be moved aside (kept as an archive), which also takes the older batches off the dashboard. Their folders under `results/` stay. The director said on 2026-11-16 that earlier data does not need to stay comparable.
+- The worktree has its own `telemetry/runs.db`, listener database and `results/` folder; the Gate 6 batch lives there until the merge.
+
 ## Waiting on the director
 
+0. **Gate 6** (director gate): confirm the evidence (it passed; see above), then say whether to merge `phase6` into `main` and move the old run log aside. Also open: whether to run the same defense batch on `llama3.1`, which is compromised in most bare runs.
 1. **Memory (settled for now).** The director set `OLLAMA_MAX_LOADED_MODELS=1`; with it every load used Vulkan and the Gate 4 batch finished. New finding: the Ollama runner process grows during a batch (`llama3.1` was 6.2 GB when loaded and 13.95 GB after 54 runs; lowest free memory in the batch was 3.1 GB). That growth, not the load size, explains the overnight low-memory stops. A long batch or a sweep needs a periodic unload or a memory watch. History of this item: correction (2026-11-15, later the same day): an earlier version of this line said Ollama runs on the CPU. That was wrong. Ollama's log shows every layer on the GPU through Vulkan (AMD Radeon 880M, integrated). An integrated GPU has no memory of its own: its "16 GB" is the same 32 GB of system RAM, so a model costs RAM twice over (about 7.9 GB of shared GPU memory for `gemma2:9b` plus host buffers; the process showed 15.5 GB, about 14 GB for `llama3.1`), leaving under 3 GB free. One load of `llama3.1` at 01:41 picked the ROCm backend instead of Vulkan; the others picked Vulkan. Decide how to run the remaining local batches and the Gate 4 batch: close other programs first, lower `num_ctx` in `config.yaml` (changes the test conditions), set Ollama to one parallel request, or run smaller batches. Nothing local will be started until then.
-2. **Configurable tools.** A ruling on `CLAUDE.md` 4 ("only these three" tools) and section 8 (shell and database tools permanently out) before the configurable tool set in `BACKLOG.md` can be designed.
+2. **Configurable tools (Phase 7).** The director ruled on 2026-11-16 that "only these three" goes and more tools are to be planned. Still open: whether a fake shell or database tool that runs nothing is allowed (section 8 says shell and database tools are permanently out), and which tools to add first. `CLAUDE.md` 4 is unchanged until that design is approved.
 3. **Gemini.** Built and run (see "Gemini batches"). Prices are not known here; the director has $60 of credit and should check the Google console for the charge.
-4. **Replace the Anthropic key.** It was pasted into a fixture file (restored, never read by a run), was printed once in the Claude session transcript, and is still in an unreachable git object in `.git` (a leftover stash, local only, never pushed). `git gc --prune=now` removes that object together with about 28 other unreachable leftovers; it has not been run.
+4. **Anthropic key (closed 2026-11-16).** The director deleted the old key in the Console. `git gc --prune=now` was run on the director's word: unreachable objects went from 97 to 6, and none of the 6 holds a key. The key was never in a branch and never pushed.
 5. **Cerebras.** Not called. Whether it bills the card after the $5 trial credit could not be confirmed.
 6. **Two-call replies.** Keep "reject" (recommended) or execute the first call and flag the reply. Haiku 4.5 hit this rule in 50 replies tonight (see below).
 7. **Make the repository public** (the director's switch, or their word).
@@ -44,6 +61,9 @@ This file is the running record of where the project stands. It is updated at th
 - 2026-11-15: model sweep design approved (a separate script that drives `run_eval.py`); moved from the backlog into `CLAUDE.md` 4.9 and Phase 5.
 - 2026-11-15: Gate 5 confirmed. Gemini provider design approved. `main` fast-forwarded to `phase4`. Repository name `redteam2.0`, Gmail address kept.
 - 2026-11-15: the repository is to be made public (job search, not a business). A README was asked for.
+- 2026-11-16: Phase 6 is refusal detection, the final-answer relay signal and the defense layer. A relay hit is kept outside `compromised` under its own term: `final_trap_mention` with the values none, reported, relayed. Defense is a batch dimension, one defense per run. A blocked attempt is recorded as blocked, not as compromised. The sweep stays bare-only; trajectories are counted per defense; the warning text names no trap.
+- 2026-11-16: earlier batches do not need to stay comparable while the harness is still being built.
+- 2026-11-16: "only these three" tools is to be dropped; more tools are to be planned (Phase 7).
 
 ## What changed on `phase4`
 

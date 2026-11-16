@@ -44,11 +44,17 @@ def _fmt(t: float) -> str:
 
 def build_command(python_exe: str, models: list[str], scenario_ids: list[str],
                   temperatures: list[float], n_runs: int, batch_id: str,
-                  config_path: str = "config.yaml") -> list[str]:
-    return [python_exe, "run_eval.py", "--config", config_path,
-            "--models", ",".join(models), "--scenarios", ",".join(scenario_ids),
-            "--temperatures", ",".join(_fmt(t) for t in temperatures),
-            "--n-runs", str(n_runs), "--batch-id", batch_id]
+                  config_path: str = "config.yaml",
+                  defenses: list[str] | None = None) -> list[str]:
+    """The run_eval command. --defenses is added only when the selection is not the
+    default (bare only), so an ordinary batch has the same command as before."""
+    command = [python_exe, "run_eval.py", "--config", config_path,
+               "--models", ",".join(models), "--scenarios", ",".join(scenario_ids),
+               "--temperatures", ",".join(_fmt(t) for t in temperatures),
+               "--n-runs", str(n_runs), "--batch-id", batch_id]
+    if defenses is not None and list(defenses) != ["none"]:
+        command += ["--defenses", ",".join(defenses)]
+    return command
 
 
 def preview_plan(command: list[str], cwd: str) -> tuple[dict | None, str | None]:

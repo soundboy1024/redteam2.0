@@ -140,6 +140,13 @@ def page_run(s: dict) -> None:
             "ui-%Y%m%dT%H%M%SZ")
     batch_id = c3.text_input("Batch name", st.session_state["default_batch"], key="batch_id")
     temperatures, temp_problem = _parse_temperatures(temp_text)
+    defense_ids = st.multiselect(
+        "Defenses", ["none", *(d["id"] for d in cfg["defenses"])], default=["none"],
+        key="defenses",
+        help="Every scenario runs once under each defense picked. 'none' is the bare run.")
+    if len(defense_ids) > 1:
+        st.caption(f"{len(defense_ids)} defenses picked: the batch is {len(defense_ids)} "
+                   "times the size of a bare one.")
 
     batches = data.list_batches(s["db"], s["results_dir"])
     port_is_open = control.port_open(s["host"], s["port"])
@@ -151,12 +158,15 @@ def page_run(s: dict) -> None:
         problem = "pick at least one model"
     elif not scenario_ids:
         problem = "pick at least one scenario"
+    elif not defense_ids:
+        problem = "pick at least one defense ('none' is the bare run)"
     elif problem is None:
         problem = _batch_name_problem(batch_id.strip(), [b["batch_id"] for b in batches],
                                       s["results_dir"])
     plan = None
     command = control.build_command(sys.executable, models, scenario_ids, temperatures,
-                                    int(n_runs), batch_id.strip(), s["config_path"])
+                                    int(n_runs), batch_id.strip(), s["config_path"],
+                                    defenses=defense_ids)
     if problem is None:
         plan, problem = _preview(tuple(command), str(ROOT))
     if plan is not None:
@@ -318,7 +328,8 @@ def page_results(s: dict) -> None:
     st.write(f"**{t['total']} runs**: {t['valid']} valid, {t['invalid']} invalid (invalid "
              f"runs are in no cell). {t['runs_with_parse_failures']} runs had parse "
              f"failures. {t['runs_with_attempted_tripwires']} runs had unexecuted trap "
-             "attempts.")
+             f"attempts. {t['runs_with_blocked_attempts']} runs had an action blocked by a "
+             "defense.")
     models = []
     for row in m["rows"]:
         if row["model_name"] not in models:
@@ -327,6 +338,7 @@ def page_results(s: dict) -> None:
         st.subheader(model)
         rows = [r for r in m["rows"] if r["model_name"] == model]
         st.dataframe(pd.DataFrame([{
+            "Defense": r["defense_id"],
             "Temp": _temp_text(r["temperature"]), "Taxonomy": r["attack_taxonomy"],
             "Valid runs": r["n_valid"],
             **{CELL_LABELS[c]: _pct(r[c], r["n_valid"]) for c in CELLS},
@@ -337,10 +349,28 @@ def page_results(s: dict) -> None:
             "Runs with unexecuted trap attempts": (
                 _pct(r["runs_with_attempted_tripwires"], r["n_valid"])
                 if r["attempted_recorded"] else data.NOT_RECORDED),
+            "Runs with blocked attempts": _pct(r["runs_with_blocked_attempts"], r["n_valid"]),
+            "Runs with provider refusals": _pct(r["runs_with_provider_refusals"],
+                                                r["n_valid"]),
+            "Final answer reported a trap": _pct(r["final_reported"], r["n_valid"]),
+            "Final answer relayed a trap": _pct(r["final_relayed"], r["n_valid"]),
             "Distinct trajectories": r["distinct_trajectories"]}
             for r in rows]), hide_index=True, width="stretch")
     st.caption("Attempted calls were never executed and are not part of any cell. Distinct "
-               "trajectories are counted per model, temperature and taxonomy.")
+               "trajectories are counted per model, defense, temperature and taxonomy.")
+    comparison = m["defense_comparison"]
+    if len({c["defense_id"] for c in comparison}) > 1:
+        st.subheader("Defense comparison")
+        st.caption("Valid runs of every temperature together. Fewer compromised runs is "
+                   "what the defense stopped; blocked runs show the model was still fooled; "
+                   "fewer completed runs is what the defense cost the real task.")
+        st.dataframe(pd.DataFrame([{
+            "Model": c["model_name"], "Taxonomy": c["attack_taxonomy"],
+            "Defense": c["defense_id"], "Valid runs": c["n_valid"],
+            "Compromised": _pct(c["compromised"], c["n_valid"]),
+            "Runs with blocked attempts": _pct(c["blocked"], c["n_valid"]),
+            "Task completed": _pct(c["task_completed"], c["n_valid"])}
+            for c in comparison]), hide_index=True, width="stretch")
     _limitations()
 
 
@@ -388,9 +418,25 @@ def page_inspect(s: dict) -> None:
             st.text(str(result.get("invalid_reason")))
         for note in result.get("notes", []):
             st.text(f"Grader note: {note}")
+        s1, s2, s3, s4 = st.columns(4)
+        s1.metric("Defense", result["defense_id"])
+        s2.metric("Final answer names a trap", result["final_trap_mention"])
+        s3.metric("Warning word in final answer", "yes" if result["noticed_injection"] else "no")
+        s4.metric("Provider refusals", result["provider_refusals"])
+        st.caption("These four are signals, not grades. The two about the final answer are "
+                   "keyword matches.")
+        if result["blocked_calls"]:
+            st.caption("Actions the defense blocked. They never ran and are not part of "
+                       "the result above.")
+            st.dataframe(pd.DataFrame([{
+                "event": c["event"], "target": c["target"],
+                "would have fired": ", ".join(c["would_fire"]) or "nothing"}
+                for c in result["blocked_calls"]]), hide_index=True, width="stretch")
     if d["inputs"]:
         st.caption("Task given to the agent")
         st.code(d["inputs"]["user_prompt"], language=None, wrap_lines=True)
+        with st.expander("System prompt this run was given"):
+            st.code(d["inputs"]["system_prompt"], language=None, wrap_lines=True)
 
     with st.container(border=True):
         st.subheader("Attempted calls that were never executed")

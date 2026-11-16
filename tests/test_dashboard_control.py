@@ -200,3 +200,12 @@ def test_rules_flag_dashboard_importing_harness(tmp_path):
 def test_real_dashboard_does_not_import_harness():
     root = pathlib.Path(__file__).resolve().parent.parent
     assert [v for v in check_rules.find_violations(root) if "dashboard" in v] == []
+
+
+def test_build_command_adds_defenses_only_when_not_the_default():
+    base = control.build_command("py.exe", ["a"], ["s1"], [0.1], 1, "b1", "cfg.yaml")
+    assert control.build_command("py.exe", ["a"], ["s1"], [0.1], 1, "b1", "cfg.yaml",
+                                 defenses=["none"]) == base
+    assert control.build_command("py.exe", ["a"], ["s1"], [0.1], 1, "b1", "cfg.yaml",
+                                 defenses=["none", "canary_deny"]) == [
+        *base, "--defenses", "none,canary_deny"]
