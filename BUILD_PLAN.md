@@ -22,7 +22,7 @@ Grading stays deterministic. No judge anywhere, including in the new work.
 1. Section 8 of CLAUDE.md: allow fake shell and database tools that return canned text. Real execution stays permanently out.
 2. Phase 7 direction: tools served from a local tool server over MCP, with the harness loop as one client.
 3. Runs per cell: keep 3 or raise to 10 (session summary, item 11). **Ruled 2026-11-18: 10, at temperatures 0.1 and 0.7.**
-4. Canary names: replace the `CANARY_` prefix and the word `TRAP` with realistic-looking strings mapped in the registry. A model that reads the current strings can see they are bait. [INFER] This changes section 3 of CLAUDE.md.
+4. Canary names: replace the `CANARY_` prefix and the word `TRAP` with realistic-looking strings mapped in the registry. A model that reads the current strings can see they are bait. [INFER] This changes section 3 of CLAUDE.md. **Ruled 2026-11-18: yes, as its own phase after Phase 7a, not before. Three conditions: the trap routes (`/exfil`, `/auth-verify`, `/admin-debug`) are renamed too; the new strings must not trip GitHub's secret scanning or `scripts/check_secrets.py`; and old names are run against new names once as a paired batch, so the effect is measured. Not built; it needs its own section and gate in CLAUDE.md first.**
 5. Two-call replies: keep "reject" or execute the first call and flag the reply (session summary, item 6). **Ruled 2026-11-18: execute the first and flag the reply. Built (CLAUDE.md 4.0).**
 
 ### 3. Phase 7: configurable tools and the tool server

@@ -63,6 +63,8 @@ class PreparedBatch:
     defenses: list          # defense entries (dicts), in run order
     free_memory_fn: Callable | None = None   # bytes free; None turns the guard off
     stop_free_memory_gb: float = 0.0         # 0 turns the guard off
+    unload_fn: Callable | None = None        # model name -> True when unloaded; None: off
+    unload_every_n_runs: int = 0             # 0 turns the periodic unload off
     skip: frozenset = frozenset()            # run slots already recorded (a resume)
     resumed: list = field(default_factory=list)       # one entry per resume, oldest first
     batch_notes: list = field(default_factory=list)   # added to the summary's notes
@@ -175,6 +177,28 @@ def memory_problem(models: list[str], floor_gb: float, free_memory_fn: Callable 
     return None
 
 
+def unload_model(cfg: dict, model: str) -> bool:
+    """Ask Ollama to unload a model and wait until it is gone."""
+    return sweep_probe.unload(cfg["ollama_host"], model)
+
+
+def _periodic_unload(prep: "PreparedBatch", model: str, state: dict) -> None:
+    """Unload a local model between runs so its runner gives back the memory its prompt
+    cache has taken (CLAUDE.md 4.11). A failed unload is logged and counted; the batch
+    goes on, and the memory guard still stands behind it."""
+    try:
+        gone = prep.unload_fn(model)
+    except sweep_probe.ProbeError as exc:
+        gone = False
+        log.error("periodic unload of %s failed: %s", model, exc)
+    if gone:
+        state["unloads"] += 1
+        log.info("unloaded %s after %d runs", model, prep.unload_every_n_runs)
+    else:
+        state["unload_failures"] += 1
+        log.error("%s was still loaded after the periodic unload", model)
+
+
 def _remove_empty_batch(batch_log) -> None:
     """Undo open_batch after a failed listener start, if nothing was written."""
     try:
@@ -201,7 +225,9 @@ def prepare_batch(cfg: dict, models: list[str], scenario_ids: list[str], n_runs:
                   defense_ids: list | None = None,
                   free_memory_fn: Callable | None = None,
                   stop_free_memory_gb: float = 0.0,
-                  digests: dict | None = None) -> PreparedBatch:
+                  digests: dict | None = None,
+                  unload_fn: Callable | None = None,
+                  unload_every_n_runs: int = 0) -> PreparedBatch:
     """Config check and batch opening: everything that may fail before a run starts."""
     defense_ids = [NO_DEFENSE["id"]] if defense_ids is None else list(defense_ids)
     defenses = resolve_defenses(cfg, defense_ids)  # ValueError before anything opens
@@ -224,7 +250,8 @@ def prepare_batch(cfg: dict, models: list[str], scenario_ids: list[str], n_runs:
     return PreparedBatch(cfg, config_path, batch_log, scenarios, chosen, list(models),
                          list(scenario_ids), n_runs, telemetry, list(temperatures), factory,
                          fixtures_root, defenses, free_memory_fn=free_memory_fn,
-                         stop_free_memory_gb=stop_free_memory_gb, model_digests=digests)
+                         stop_free_memory_gb=stop_free_memory_gb, model_digests=digests,
+                         unload_fn=unload_fn, unload_every_n_runs=unload_every_n_runs)
 
 
 def _slot(model, scenario_id, defense_id, temperature, repetition_index) -> tuple:
@@ -259,7 +286,9 @@ def prepare_resume(cfg: dict, batch_id: str, chat_fn_factory: Callable | None = 
                    fixtures_root: str = FIXTURES_ROOT,
                    free_memory_fn: Callable | None = None,
                    stop_free_memory_gb: float = 0.0,
-                   digests_fn: Callable | None = None) -> PreparedBatch:
+                   digests_fn: Callable | None = None,
+                   unload_fn: Callable | None = None,
+                   unload_every_n_runs: int = 0) -> PreparedBatch:
     """Everything that may fail before a stopped batch is taken up again (CLAUDE.md
     4.11). The selection comes from the batch's own batch.json, never from flags.
     Raises ValueError with the reason; changes nothing until it returns."""
@@ -331,7 +360,8 @@ def prepare_resume(cfg: dict, batch_id: str, chat_fn_factory: Callable | None = 
                          free_memory_fn=free_memory_fn,
                          stop_free_memory_gb=stop_free_memory_gb, skip=done,
                          resumed=resumed, batch_notes=notes,
-                         model_digests=dict(recorded_digests))
+                         model_digests=dict(recorded_digests),
+                         unload_fn=unload_fn, unload_every_n_runs=unload_every_n_runs)
 
 
 def _plan(batch_id: str, models: list, scenario_ids: list, temperatures: list,
@@ -366,7 +396,9 @@ def _run_all(prep: PreparedBatch, state: dict) -> None:
     step_sink, record_run = _guard(step), _guard(record)
     event_sink = _guard(lambda run_id, ev: log_tool_event(batch_log, run_id, ev))
     consecutive = 0
+    periodic = bool(prep.unload_fn and prep.unload_every_n_runs)
     for model in prep.models:
+        since_load = 0  # runs of this model since this batch last unloaded it
         for scenario in prep.chosen:
             for defense, temperature, rep in (
                     (d, t, r) for d in prep.defenses
@@ -375,6 +407,9 @@ def _run_all(prep: PreparedBatch, state: dict) -> None:
                 if _slot(model, scenario["id"], defense["id"], temperature,
                          rep) in prep.skip:
                     continue  # recorded before this resume
+                if periodic and is_local(model) and since_load >= prep.unload_every_n_runs:
+                    _periodic_unload(prep, model, state)
+                    since_load = 0
                 low = memory_problem([model], prep.stop_free_memory_gb, prep.free_memory_fn)
                 if low:
                     log.error("aborting batch %s: %s", batch_log.batch_id, low)
@@ -389,6 +424,7 @@ def _run_all(prep: PreparedBatch, state: dict) -> None:
                               defense=defense)
                 record_run(rec)
                 state["recorded"] += 1
+                since_load += 1
                 # Stored now, so a live view has a grade to show (CLAUDE.md 4.8).
                 # An invalid run waits for the end of the batch: after a listener
                 # fault its listener row can still land late, and a stored row is
@@ -426,7 +462,8 @@ def execute_batch(prep: PreparedBatch) -> dict:
         _remove_empty_batch(batch_log)
         raise ListenerStartError(str(exc)) from exc
     started_at = _now()
-    state = {"recorded": 0, "aborted": False, "abort_reason": None}
+    state = {"recorded": 0, "aborted": False, "abort_reason": None,
+             "unloads": 0, "unload_failures": 0}
     error = None
     try:  # inside the guarded block: a failure here must still stop the listener
         fields = {"pid": os.getpid(),
@@ -457,7 +494,15 @@ def execute_batch(prep: PreparedBatch) -> dict:
     if prep.resumed:
         first = (batch_plan.read_plan(batch_log.out_dir) or {}).get("started_at")
         meta["started_at"] = first or started_at
-    notes = prep.batch_notes or None
+    notes = list(prep.batch_notes)
+    if state["unloads"] or state["unload_failures"]:
+        failed = (f"; {state['unload_failures']} unload(s) failed"
+                  if state["unload_failures"] else "")
+        notes.append(f"A local model was unloaded and loaded again {state['unloads']} "
+                     f"time(s) during this batch, after every {prep.unload_every_n_runs} "
+                     "runs, to free the memory its runner's prompt cache had taken"
+                     f"{failed}.")
+    notes = notes or None
     try:
         batch_plan.finalise_plan(batch_log.out_dir, meta["ended_at"], state["aborted"],
                                  state["abort_reason"])
@@ -639,6 +684,9 @@ def _parser() -> argparse.ArgumentParser:
     p.add_argument("--stop-free-memory-gb", type=float, default=None,
                    help="stop a batch with a local model when free memory falls under "
                         "this many GB; 0 turns the check off; default from config")
+    p.add_argument("--unload-every-n-runs", type=int,
+                   help="unload a local model after this many runs in a row, between "
+                        "runs; 0 turns it off; default from config")
     p.add_argument("--allow-any-model", action="store_true",
                    help="accept a model name that is not in config.yaml")
     return p
@@ -716,8 +764,12 @@ def main(argv: list[str] | None = None) -> int:
              else args.stop_free_memory_gb)
     if not math.isfinite(floor) or floor < 0:
         return _fail("--stop-free-memory-gb must be 0 or more")
+    every = (cfg["unload_every_n_runs"] if args.unload_every_n_runs is None
+             else args.unload_every_n_runs)
+    if every < 0:
+        return _fail("--unload-every-n-runs must be 0 or more")
     if args.resume is not None:
-        return _resume_main(cfg, args, floor)
+        return _resume_main(cfg, args, floor, every)
     all_ids = [s["id"] for s in load_scenarios(SCENARIOS_PATH)]
     scenario_ids = all_ids if args.scenarios is None else _csv(args.scenarios)
     if not scenario_ids:
@@ -770,13 +822,15 @@ def main(argv: list[str] | None = None) -> int:
                              temperatures=temperatures, config_path=args.config,
                              command=command, defense_ids=defense_ids,
                              free_memory_fn=free_memory_bytes, stop_free_memory_gb=floor,
-                             digests=model_digests(cfg, models))
+                             digests=model_digests(cfg, models),
+                             unload_fn=partial(unload_model, cfg),
+                             unload_every_n_runs=every)
     except ValueError as exc:
         return _fail(str(exc))
     return _execute_main(prep)
 
 
-def _resume_main(cfg: dict, args, floor: float) -> int:
+def _resume_main(cfg: dict, args, floor: float, every: int) -> int:
     """--resume: the selection comes from batch.json, so selection flags are refused."""
     given = [f for f, v in (("--models", args.models), ("--scenarios", args.scenarios),
                             ("--n-runs", args.n_runs),
@@ -790,7 +844,8 @@ def _resume_main(cfg: dict, args, floor: float) -> int:
         prep = prepare_resume(
             cfg, args.resume, config_path=args.config, free_memory_fn=free_memory_bytes,
             stop_free_memory_gb=floor,
-            digests_fn=lambda: model_digests(cfg, _plan_models(cfg, args.resume)))
+            digests_fn=lambda: model_digests(cfg, _plan_models(cfg, args.resume)),
+            unload_fn=partial(unload_model, cfg), unload_every_n_runs=every)
     except ValueError as exc:
         return _fail(str(exc))
     problem = hosted_problem(prep.models, prep.telemetry, os.environ)

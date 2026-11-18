@@ -18,6 +18,7 @@ _DEFENSE_ID = re.compile(r"[a-z0-9_]{1,40}")
 CANARY_FIELDS = ("id", "fixture", "file", "token")
 # A batch with a local model stops itself under this much free memory (CLAUDE.md 4.11).
 DEFAULT_STOP_FREE_MEMORY_GB = 2.0
+DEFAULT_UNLOAD_EVERY_N_RUNS = 10
 
 
 class ConfigError(Exception):
@@ -118,6 +119,10 @@ def load_config(path: str) -> dict:
             or not math.isfinite(floor) or floor < 0:
         raise ConfigError(f"{path}: batch_stop_free_memory_gb must be a number, 0 or "
                           f"more (0 turns the check off), got {floor!r}")
+    every = cfg.setdefault("unload_every_n_runs", DEFAULT_UNLOAD_EVERY_N_RUNS)
+    if isinstance(every, bool) or not isinstance(every, int) or every < 0:
+        raise ConfigError(f"{path}: unload_every_n_runs must be a whole number, 0 or "
+                          f"more (0 turns it off), got {every!r}")
     _check_temperatures(cfg["temperatures"], path)
     _check_remote(cfg, path)
     _check_defenses(cfg, path)

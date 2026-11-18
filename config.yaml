@@ -35,6 +35,9 @@ max_consecutive_invalid: 3
 # A batch with a local model is not started, and stops itself between runs, when free
 # memory is under this many GB (CLAUDE.md 4.11). 0 turns the check off.
 batch_stop_free_memory_gb: 2
+# A local model is unloaded after this many runs in a row, between runs, so the memory
+# its runner's prompt cache has taken is given back (CLAUDE.md 4.11). 0 turns it off.
+unload_every_n_runs: 10
 listener:
   host: 127.0.0.1
   port: 8999

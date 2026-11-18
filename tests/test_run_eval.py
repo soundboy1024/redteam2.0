@@ -1506,3 +1506,61 @@ def test_end_to_end_base64_canary_is_caught_by_the_listener(env):
     assert r["canary_ids"] == ["log_env"] and r["canary_forms"] == {"log_env": ["base64"]}
     summary = (pathlib.Path(out["out_dir"]) / "summary.md").read_text(encoding="utf-8")
     assert "a canary left the sandbox as: base64" in summary
+
+
+# ---- periodic unload of a local model (CLAUDE.md 4.11) ----
+
+def unloading_batch(env, n_runs, every, unload_fn, batch_id="u1", models=("m:1b",)):
+    cfg, cfg_path, _ = env
+    prep = run_eval.prepare_batch(
+        cfg, list(models), ["benign_tempting"], n_runs, False, batch_id,
+        factory_for(default=CLEAN), temperatures=[0.3], config_path=cfg_path,
+        unload_fn=unload_fn, unload_every_n_runs=every)
+    return run_eval.execute_batch(prep)
+
+
+def test_local_model_is_unloaded_after_every_n_runs_between_runs(env):
+    seen = []
+    out = unloading_batch(env, n_runs=5, every=2, unload_fn=lambda m: seen.append(m) or True)
+    assert seen == ["m:1b", "m:1b"]  # before run 3 and before run 5, never after the last
+    assert out["aborted"] is False and len(out["results"]) == 5
+    summary = (pathlib.Path(out["out_dir"]) / "summary.md").read_text(encoding="utf-8")
+    assert "unloaded and loaded again 2 time(s) during this batch, after every 2 runs" in summary
+
+
+def test_periodic_unload_is_off_at_zero_and_for_hosted_models(env, monkeypatch):
+    seen = []
+    out = unloading_batch(env, n_runs=3, every=0, unload_fn=lambda m: seen.append(m) or True)
+    summary = (pathlib.Path(out["out_dir"]) / "summary.md").read_text(encoding="utf-8")
+    assert seen == [] and "unloaded and loaded again" not in summary
+    unloading_batch(env, n_runs=3, every=1, unload_fn=lambda m: seen.append(m) or True,
+                    batch_id="u2", models=("anthropic/claude-haiku-4-5",))
+    assert seen == []
+
+
+def test_failed_periodic_unload_is_logged_counted_and_does_not_stop_the_batch(env, caplog):
+    def broken(model):
+        raise run_eval.sweep_probe.ProbeError("ollama did not answer")
+    with caplog.at_level(logging.ERROR):
+        out = unloading_batch(env, n_runs=3, every=1, unload_fn=broken)
+    assert out["aborted"] is False and len(out["results"]) == 3
+    assert "periodic unload of m:1b failed: ollama did not answer" in caplog.text
+    summary = (pathlib.Path(out["out_dir"]) / "summary.md").read_text(encoding="utf-8")
+    assert "unloaded and loaded again 0 time(s)" in summary and "2 unload(s) failed" in summary
+    out = unloading_batch(env, n_runs=2, every=1, unload_fn=lambda m: False, batch_id="u3")
+    summary = (pathlib.Path(out["out_dir"]) / "summary.md").read_text(encoding="utf-8")
+    assert "1 unload(s) failed" in summary
+
+
+def test_config_unload_every_defaults_and_is_checked(tmp_path):
+    from rt_config import ConfigError
+    raw = yaml.safe_load((ROOT / "config.yaml").read_text(encoding="utf-8"))
+    assert raw["unload_every_n_runs"] == 10
+    raw.pop("unload_every_n_runs")
+    p = tmp_path / "c.yaml"
+    p.write_text(yaml.safe_dump(raw), encoding="utf-8")
+    assert load_config(str(p))["unload_every_n_runs"] == 10
+    for bad in (-1, 2.5, "ten", True):
+        p.write_text(yaml.safe_dump(dict(raw, unload_every_n_runs=bad)), encoding="utf-8")
+        with pytest.raises(ConfigError, match="unload_every_n_runs"):
+            load_config(str(p))

@@ -364,9 +364,11 @@ How to read a defense. Fewer compromised runs shows what the defense stopped. Bl
 
 ### 4.11 Batch robustness
 
-Added at the director's request on 2026-11-17. Four additions to an ordinary batch. None changes a tripwire, a cell or a stored result row.
+Added at the director's request on 2026-11-17. Five additions to an ordinary batch (the periodic unload on 2026-11-18). None changes a tripwire, a cell or a stored result row.
 
 Memory guard. `batch_stop_free_memory_gb` in config.yaml (default 2; 0 turns it off; `--stop-free-memory-gb` overrides it for one batch). A batch that includes a local model is not started when free physical memory is under the floor. While it runs, free memory is read before every run of a local model; under the floor the batch stops itself there, with the abort reason "free memory under the floor: <x> GB free, floor <y> GB", and grades and writes what it has like any aborted batch. The check is between runs, never inside one, so no run is cut off by it. Hosted models load nothing here and are not checked. Known limitation: memory that runs out inside a single run is not caught by this check.
+
+Periodic unload (added 2026-11-18). Ollama's runner keeps a prompt cache: each time a new run starts it saves the previous conversation in ordinary memory, about 0.16 GB per run for `llama3.1`, up to a limit of 8192 MiB. A long batch therefore grows to about 8 GB above the model's loaded size. `unload_every_n_runs` in config.yaml (default 10; 0 turns it off; `--unload-every-n-runs` overrides it for one batch) makes the batch unload a local model after that many runs in a row, between runs, never inside one; Ollama loads it again on the next request with an empty cache. The count starts again for each model and each resume. A failed unload is logged at ERROR and counted, and the batch goes on. The summary says how many times the model was unloaded and how many unloads failed. Hosted models are never unloaded. The sweep's batches use the same setting. Known limitation: a model is reloaded with the same settings and seed, but outputs after a reload are not guaranteed to be identical to those of a run without one.
 
 Resume. `run_eval.py --resume <batch_id>` runs the planned runs of a stopped batch that were never recorded, under the same batch id and in the same folder. The selection comes from the batch's own `batch.json`; selection flags are refused. A planned run is identified by model, scenario, defense, temperature and repetition; one that has a recorded run, valid or invalid, is not run again. Resume is refused, and changes nothing, when: the batch has no `batch.json`; its process is still alive; every planned run is recorded; a scenario entry or system prompt differs from what a recorded run was given (compared with run_inputs); or a model still to be run is a different installed build than the batch recorded. Stored result rows are kept, never overwritten. `batch.json` and the results carry `resumed`, one entry per resume (time, runs recorded before, runs remaining); the first start time is kept; the summary says the batch was resumed and that its runs were recorded in more than one sitting. A run cut off mid-run stays in no cell and is named in the summary; its place in the plan is run again under a new run id. A resumed batch can be stopped and resumed again. The dashboard has no Resume button; it is a command.
 
@@ -382,7 +384,7 @@ Checks on every push. `.github/workflows/checks.yml` runs, on a Windows runner w
         CLAUDE.md
         BACKLOG.md
         requirements.txt        fastapi, uvicorn, requests, pandas, numpy, pydantic, streamlit
-        config.yaml             models to test, ollama host, n_runs, temperatures (a list; every model runs at each), telemetry flag, canary registry, defenses, batch memory floor
+        config.yaml             models to test, ollama host, n_runs, temperatures (a list; every model runs at each), telemetry flag, canary registry, defenses, batch memory floor, periodic unload
         traps/
             honeypot_server.py
             scenarios.json
