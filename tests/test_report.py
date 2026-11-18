@@ -454,6 +454,18 @@ def test_summary_has_attempt_column(tmp_path):
             in text.split("## Totals")[0])
 
 
+def test_summary_lists_replies_with_more_than_one_object(tmp_path):
+    rows = attempt_rows()
+    rows[0]["multi_object_replies"] = 2  # rows[1] has no such key: an older stored row
+    text = read(write_summary_md(str(tmp_path), META, rows))
+    section = text.split("## Replies with more than one JSON object")[1].split("##")[0]
+    assert "- a1 " in section and section.strip().endswith("used: 2")
+    assert "- a2 " not in section
+    assert "the first is used and the rest are never executed" in text
+    none = read(write_summary_md(str(tmp_path), META, attempt_rows()))
+    assert none.split("## Replies with more than one JSON object")[1].split("##")[0].strip() == "None"
+
+
 def test_transcript_lists_attempted_calls(tmp_path):
     res = attempt_rows()[0]
     text = read(write_transcript_md(str(tmp_path), res, [], [], []))

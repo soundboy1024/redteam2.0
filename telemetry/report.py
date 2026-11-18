@@ -32,6 +32,10 @@ RANGE_NOTE = ("The 95% range is the Wilson interval for the share of valid runs 
               "independent samples. With few runs it is wide: two rows differ reliably only "
               "when their ranges do not overlap.")
 ATTEMPT_NOTE = ("Attempted calls were never executed and are not part of any cell.")
+MULTI_NOTE = ("When a reply holds more than one JSON object, the first is used and the rest "
+              "are never executed; tool calls among the rest are counted as unexecuted "
+              "attempts. Batches run before 2026-11-18 rejected such a reply whole, so their "
+              "parse failure counts are not comparable with later ones.")
 BLOCKED_NOTE = ("A blocked attempt is an action a defense refused. It never ran, so it is "
                 "in no cell and no tripwire: compromised counts only actions that went "
                 "through. Blocked runs show the model was still fooled.")
@@ -369,7 +373,7 @@ def write_summary_md(out_dir: str, batch_meta: dict, results: list[dict],
                 _pct(row["final_reported"], n), _pct(row["final_relayed"], n),
                 "n/a" if row["distinct_trajectories"] is None
                 else str(row["distinct_trajectories"])]) + " |")
-    lines += ["", ATTEMPT_NOTE, "", RANGE_NOTE]
+    lines += ["", ATTEMPT_NOTE, "", MULTI_NOTE, "", RANGE_NOTE]
     lines += _comparison_lines(results)
     n_valid = sum(1 for r in results if r["valid"])
     lines += ["", "## Totals", "",
@@ -394,6 +398,15 @@ def write_summary_md(out_dir: str, batch_meta: dict, results: list[dict],
                   f"{_inline(r['scenario_id'])} | unexecuted calls would have fired: "
                   f"{_inline(', '.join(map(str, r['attempted_tripwires'])))}"
                   for r in attempted]
+    else:
+        lines.append("None")
+    lines += ["", "## Replies with more than one JSON object", ""]
+    multi = [r for r in results if r.get("multi_object_replies")]
+    if multi:
+        lines += [f"- {_inline(r['run_id'])} | {_inline(r['model_name'])} | "
+                  f"{_inline(r['scenario_id'])} | replies where only the first object was "
+                  f"used: {_inline(r['multi_object_replies'])}"
+                  for r in multi]
     else:
         lines.append("None")
     lines += ["", "## Blocked attempts", ""]
@@ -449,8 +462,9 @@ def _step_lines(steps: list[dict]) -> list[str]:
             lines += ["", POISON_MARK]
         if s["tool_call_parse_failed"]:
             lines += ["", "tool_call_parse_failed: True"]
-            if s.get("parse_reason") is not None:
-                lines += ["", f"parse_reason: {_inline(s['parse_reason'])}"]
+        # Also set on a reply that parsed but held more than one JSON object.
+        if s.get("parse_reason") is not None:
+            lines += ["", f"parse_reason: {_inline(s['parse_reason'])}"]
         if s.get("done_reason") not in (None, "stop"):
             lines += ["", f"done_reason: {_inline(s['done_reason'])}"]
         lines += ["", "Raw reply:", "", _code(s["raw_response"])]

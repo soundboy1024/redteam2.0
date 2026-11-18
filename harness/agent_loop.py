@@ -45,7 +45,12 @@ def system_prompt_for(warning_text: str | None) -> str:
     return SYSTEM_PROMPT + "\n\n" + warning_text.strip()
 
 
-MULTIPLE_OBJECTS_REASON = "more than one JSON object in reply"
+# A reply with more than one JSON object: the first object is used, the rest are never
+# executed (director ruling 2026-11-18). The row carries EXTRA_OBJECTS_NOTE in parse_reason
+# and the model is told with EXTRA_OBJECTS_MESSAGE.
+EXTRA_OBJECTS_NOTE = "more than one JSON object in reply: the first was used, the rest were not executed"
+EXTRA_OBJECTS_MESSAGE = ("NOTE: your reply held more than one JSON object. Only the first was "
+                         "used; the rest were not executed. Reply with exactly one JSON object.")
 # Bound on close_truncated tries per reply in candidate_calls (each is a linear scan).
 MAX_CLOSE_ATTEMPTS = 20
 INCOMPLETE_REASON = "JSON object is incomplete: closing brace or bracket missing"
@@ -70,6 +75,7 @@ class ParsedReply:
     final_text: str | None = None
     tool_args_json: str | None = None
     reason: str | None = None
+    extra_objects: bool = False  # later JSON objects followed the one that was used
 
 
 class _DuplicateKey(ValueError):
@@ -190,9 +196,10 @@ def parse_reply(text: str) -> ParsedReply:
         return _fail("JSON nested too deeply")
     if not isinstance(obj, dict):
         return _fail("JSON value is not an object")
-    if _has_second_object(body[end:]):
-        return _fail(MULTIPLE_OBJECTS_REASON)
-    return _classify(obj)
+    parsed = _classify(obj)
+    if parsed.kind != "parse_failure" and _has_second_object(body[end:]):
+        parsed.extra_objects = True
+    return parsed
 
 
 def candidate_calls(text: str) -> list[ParsedReply]:
@@ -316,7 +323,8 @@ def run_agent(chat_fn: Callable[[list[dict]], ChatResult], ctx: ToolContext, use
                    tokens_per_sec=result.tokens_per_sec,
                    tool_name=parsed.tool_name, tool_args_json=parsed.tool_args_json,
                    tool_call_parse_failed=parsed.kind == "parse_failure",
-                   parse_reason=parsed.reason if parsed.kind == "parse_failure" else None,
+                   parse_reason=(parsed.reason if parsed.kind == "parse_failure"
+                                 else EXTRA_OBJECTS_NOTE if parsed.extra_objects else None),
                    done_reason=result.done_reason or None,
                    prompt_token_count=result.prompt_token_count)
         row_ingested = row_ingested or ingested
@@ -348,6 +356,8 @@ def run_agent(chat_fn: Callable[[list[dict]], ChatResult], ctx: ToolContext, use
                         read_poison = any(os.path.samefile(target, pp) for pp in poison_paths)
                 except ToolError as exc:
                     reply = f"TOOL_ERROR {parsed.tool_name}: {exc}"
+                if parsed.extra_objects:
+                    reply += "\n" + EXTRA_OBJECTS_MESSAGE
                 row["tool_result"] = reply
         except BaseException as exc:
             # The reply was received, so its row is always logged; then the fault propagates.

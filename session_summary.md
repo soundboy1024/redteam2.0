@@ -73,6 +73,16 @@ cd C:\Users\casey\Desktop\redteam2.0\.worktrees\hardening
 
 The sweep's batches and record are in the worktree's `results/` and have to be moved to the main checkout when the branch is merged, as with Phase 6.
 
+## Memory growth during a batch: cause found, 2026-11-18
+
+Probe: batch `memprobe-llama31-20261118` (`llama3.1:latest`, 18 runs, temperature 0.7), with free memory, the runner's size and its GPU use read every 10 seconds.
+
+- The runner (`llama-server.exe`, started by Ollama 0.40.16) grew from 6.09 GB to 9.03 GB of private memory, about 0.16 GB per run. The growth is per run, not per step or per token. GPU shared memory stayed at 5.97 GB throughout.
+- Cause: the runner's prompt cache. When a new conversation starts, it saves the previous one in ordinary memory. Ollama's log shows one save per run ("saving prompt with length 1307, total state size = 163 MiB") and the total after the batch ("cache state: 16 prompts, 2974 MiB (limits: 8192 MiB)"), which matches the growth measured.
+- The cache is capped at 8192 MiB, so a long batch levels off about 8 GB above the model's loaded size. That matches the earlier reading of `llama3.1` at 13.95 GB after 54 runs.
+- Unloading the model frees all of it: free memory went from 6.8 GB back to 17.0 GB.
+- Not fixed yet. Options: unload the model every so many runs inside a batch (in the harness's control), or start the runner with its cache off (`--cache-ram 0`; whether Ollama lets that through has not been tested).
+
 ## Phase 7 direction (discussion only, 2026-11-17)
 
 Nothing here is designed, approved or in `CLAUDE.md`. The director's thinking so far:
@@ -91,9 +101,9 @@ What was said back, as proposals: "right tool" and "confusing language" can be g
 3. **Gemini.** Built and run (see "Gemini batches"). Prices are not known here; the director has $60 of credit and should check the Google console for the charge.
 4. **Anthropic key (closed 2026-11-16).** The director deleted the old key in the Console. `git gc --prune=now` was run on the director's word: unreachable objects went from 97 to 6, and none of the 6 holds a key. The key was never in a branch and never pushed.
 5. **Cerebras (set aside 2026-11-17).** Not called. The director said it is not a priority and may not be used at all.
-6. **Two-call replies.** Keep "reject" (recommended) or execute the first call and flag the reply. Haiku 4.5 hit this rule in 50 replies tonight (see below).
+6. **Two-call replies (closed 2026-11-18).** The director ruled: execute the first call and flag the reply. Built (`CLAUDE.md` 4.0). The options were: keep "reject" (recommended) or execute the first call and flag the reply. Haiku 4.5 hit this rule in 50 replies tonight (see below).
 7. **Repository public (closed 2026-11-17).** Made public on the director's word.
-8. **Commit and push the hardening work.** Nothing from 2026-11-17 is committed. Until it is pushed, the public README does not show the defense results and the checks have not run on GitHub.
+8. **Commit and push the hardening work (done 2026-11-18, branch `hardening`, not yet merged to `main`).** As written on 2026-11-17: nothing from 2026-11-17 is committed. Until it is pushed, the public README does not show the defense results and the checks have not run on GitHub.
 9. **Restart the 13-model sweep.** Started on the director's word and stopped at 2 of 13 for low memory (see "Sweep `full13-20261117`"). It is restarted only on the director's word, best from their own terminal.
 10. **Phase 7 direction.** Under discussion (see "Phase 7 direction"): tool use beyond injection. Nothing is designed.
 11. **Runs per cell (closed 2026-11-18).** The director ruled 10. `n_runs: 10` in `config.yaml`; the sweep uses the same setting. Temperatures are 0.1 and 0.7 from the same date (0.3 dropped).
