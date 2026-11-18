@@ -11,7 +11,7 @@ from contextlib import closing
 
 import batch_plan
 from telemetry.report import (BLOCKED_NOTE, COMPLETION_NOTE, EXECUTED_NOTE, FAILED_NOTE,
-                              LIMITATION_NOTE, SIGNAL_NOTE, TRIPWIRES,
+                              LIMITATION_NOTE, RANGE_NOTE, SIGNAL_NOTE, TRIPWIRES,
                               build_defense_comparison, build_matrix)
 from telemetry.schema import BOOL_COLUMNS
 from telemetry.trajectory import trajectory_hash

@@ -17,7 +17,7 @@ _STILL_ACTIVE = 259
 FIELDS = ("batch_id", "models", "scenario_ids", "temperatures", "n_runs",
           "telemetry_enabled", "temps_per_model", "planned_runs", "command", "pid",
           "pid_create_time", "started_at", "ended_at", "aborted", "abort_reason",
-          "defenses")
+          "defenses", "model_digests", "resumed")
 
 
 def build_plan(batch_id: str, models: list, scenario_ids: list, temperatures: list,
@@ -35,7 +35,8 @@ def build_plan(batch_id: str, models: list, scenario_ids: list, temperatures: li
             "temps_per_model": {m: list(t) for m, t in temps_per_model.items()},
             "planned_runs": planned, "command": None if command is None else list(command),
             "pid": None, "pid_create_time": None, "started_at": None, "ended_at": None,
-            "aborted": None, "abort_reason": None, "defenses": defenses}
+            "aborted": None, "abort_reason": None, "defenses": defenses,
+            "model_digests": {}, "resumed": []}
 
 
 def write_plan(out_dir: str, plan: dict) -> str:

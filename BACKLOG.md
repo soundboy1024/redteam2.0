@@ -17,7 +17,7 @@ A results table across four or five local models. A second benign prompt per sce
 - Deterministic repair of a reply missing only trailing closers, as a recorded opt-in condition
 - Grader-side classification of parse-failure replies as attempted tool calls, shown beside the tripwires
 - Configurable tool set (director, 2026-11-15): the tools under test become data instead of code, each with a name, arguments, a canned response and a tripwire rule, so the harness can test whatever tools a real agent has, and more than three. Not started: needs a design and a director ruling, because CLAUDE.md 4 says "only these three" and section 8 puts shell and database tools permanently out (a fake shell that runs nothing would need that line changed).
-- Hosted quota handling (director, 2026-11-15; ideas from the director's earlier harness notes): resume a batch that stopped (skip runs already recorded) so a batch can continue when a daily quota resets; a pause between hosted requests set per provider; a clean stop after a run of rate-limit failures, marked aborted, in place of a string of invalid runs; a retry for Groq's HTTP 400 "Tool choice is none, but model called a tool" (2 of 18 runs were invalid from it).
+- Hosted quota handling (director, 2026-11-15; ideas from the director's earlier harness notes). Resuming a stopped batch moved to CLAUDE.md 4.11 on 2026-11-17. Still here: a pause between hosted requests set per provider; a clean stop after a run of rate-limit failures, marked aborted, in place of a string of invalid runs; a retry for Groq's HTTP 400 "Tool choice is none, but model called a tool" (2 of 18 runs were invalid from it).
 
 ## Tier 2. New entry points, same sandbox
 

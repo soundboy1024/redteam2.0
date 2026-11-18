@@ -201,7 +201,7 @@ def test_reads_do_not_write(env):
 
 def test_limitations_include_exact_match_and_pointer_notes():
     text = " ".join(data.LIMITATIONS)
-    assert "exact string match" in text and "not comparable" in text
+    assert "disguised forms" in text and "not comparable" in text
 
 
 def test_dashboard_modules_do_not_load_harness_even_indirectly():

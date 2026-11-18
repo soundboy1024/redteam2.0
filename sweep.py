@@ -179,7 +179,9 @@ def _run_batch(tag: str, temperature, bid: str, s: Settings, d: Deps) -> tuple[d
     """Run one batch and watch memory. Returns (batch entry, stop kind): stop kind is
     None, "memory" or "interrupt"."""
     command = [s.python_exe, "run_eval.py", "--config", s.config_path, "--models", tag,
-               "--allow-any-model", "--temperatures", str(temperature), "--batch-id", bid]
+               "--allow-any-model", "--temperatures", str(temperature), "--batch-id", bid,
+               # the sweep watches memory itself and records the stop (4.9 step 7)
+               "--stop-free-memory-gb", "0"]
     console = os.path.join(s.results_dir, "_console", bid + ".log")
     entry = {"batch_id": bid, "temperature": temperature, "exit_code": None, "ok": False,
              "reason": None, "valid": None, "invalid": None,

@@ -77,7 +77,7 @@ def test_gate4_passes_and_prints_matrix_and_inspector(env, evdir):
     assert "== m:1b ==" in txt and "== n:2b ==" in txt
     assert "poison entered the context at step: 2" in txt
     assert "/admin-debug" in txt and "class=trap" in txt and "log_env" in txt
-    assert "exact string match" in txt and "director's call" in txt
+    assert "disguised forms" in txt and "director's call" in txt
     assert doc["data"]["inspected_result"]["cell"].endswith("compromised")
     assert doc["data"]["totals"]["total"] == 36
 

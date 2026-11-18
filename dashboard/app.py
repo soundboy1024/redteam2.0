@@ -1,6 +1,6 @@
 """redteam2.0 control panel and inspector (CLAUDE.md 4.8 and Phase 4).
 
-Three pages: Run, Results, Inspect a run. This app never grades: every grade shown
+Four pages: Run, Results, Inspect a run, Archive. This app never grades: every grade shown
 is a row the grader stored. Model text is untrusted and is only ever shown through
 st.code, st.text or a dataframe cell, never as HTML.
 
@@ -20,11 +20,11 @@ if str(ROOT) not in sys.path:  # `streamlit run dashboard/app.py` puts dashboard
 import pandas as pd  # noqa: E402
 import streamlit as st  # noqa: E402
 
-from dashboard import control, data  # noqa: E402
+from dashboard import archive, control, data  # noqa: E402
 from rt_config import ConfigError, load_config  # noqa: E402
 from telemetry.report import CELLS  # noqa: E402
 
-PAGES = ("Run", "Results", "Inspect a run")
+PAGES = ("Run", "Results", "Inspect a run", "Archive")
 CELL_LABELS = {"completed_clean": "Completed and clean",
                "completed_compromised": "Completed and compromised",
                "failed_clean": "Failed and clean",
@@ -61,6 +61,13 @@ def _temp_text(t) -> str:
 
 def _pct(count: int, n: int) -> str:
     return f"{count} ({round(100 * count / n)}%)" if n else f"{count}"
+
+
+def _range_text(count: int, span, n: int) -> str:
+    """'2 of 3 (21% to 94%)' from a stored Wilson range; 'n/a' with no valid run."""
+    if span is None:
+        return "n/a"
+    return f"{count} of {n} ({span[0] * 100:.0f}% to {span[1] * 100:.0f}%)"
 
 
 def _parse_temperatures(text: str) -> tuple[list[float], str | None]:
@@ -342,6 +349,8 @@ def page_results(s: dict) -> None:
             "Temp": _temp_text(r["temperature"]), "Taxonomy": r["attack_taxonomy"],
             "Valid runs": r["n_valid"],
             **{CELL_LABELS[c]: _pct(r[c], r["n_valid"]) for c in CELLS},
+            "Compromised (95% range)": _range_text(r["compromised"], r["compromised_range"],
+                                                   r["n_valid"]),
             "Invalid": r["invalid"],
             "Poison read": _pct(r["poison_ingested"], r["n_valid"]),
             "Canary read": _pct(r["canary_read"], r["n_valid"]),
@@ -357,7 +366,8 @@ def page_results(s: dict) -> None:
             "Distinct trajectories": r["distinct_trajectories"]}
             for r in rows]), hide_index=True, width="stretch")
     st.caption("Attempted calls were never executed and are not part of any cell. Distinct "
-               "trajectories are counted per model, defense, temperature and taxonomy.")
+               "trajectories are counted per model, defense, temperature and taxonomy. "
+               + data.RANGE_NOTE)
     comparison = m["defense_comparison"]
     if len({c["defense_id"] for c in comparison}) > 1:
         st.subheader("Defense comparison")
@@ -368,6 +378,8 @@ def page_results(s: dict) -> None:
             "Model": c["model_name"], "Taxonomy": c["attack_taxonomy"],
             "Defense": c["defense_id"], "Valid runs": c["n_valid"],
             "Compromised": _pct(c["compromised"], c["n_valid"]),
+            "Compromised (95% range)": _range_text(c["compromised"], c["compromised_range"],
+                                                   c["n_valid"]),
             "Runs with blocked attempts": _pct(c["blocked"], c["n_valid"]),
             "Task completed": _pct(c["task_completed"], c["n_valid"])}
             for c in comparison]), hide_index=True, width="stretch")
@@ -511,6 +523,67 @@ def page_inspect(s: dict) -> None:
             st.write("Telemetry was on but no entropy values were recorded.")
 
 
+# ---- Archive page -----------------------------------------------------------
+
+def _archive_cell(value) -> str:
+    """One stored value as plain text for a table cell."""
+    if value is None:
+        return ""
+    if isinstance(value, (list, dict)):
+        return json.dumps(value, ensure_ascii=False)
+    return str(value)
+
+
+def page_archive(s: dict) -> None:
+    st.header("Archive")
+    st.caption(archive.NOTE)
+    current = [b["batch_id"] for b in data.list_batches(s["db"], s["results_dir"])]
+    ids = archive.list_archived(s["results_dir"], current)
+    if not ids:
+        st.write("No archived batches.")
+        return
+    batch_id = st.selectbox("Archived batch", ids, key="archive_batch")
+    doc = archive.read_archived(s["results_dir"], batch_id)
+    if doc["problem"]:
+        st.error(doc["problem"])
+    meta = doc["batch"]
+    if meta.get("aborted"):
+        st.warning("This batch was ABORTED early: "
+                   + str(meta.get("abort_reason") or "(no reason recorded)"))
+    st.caption("Batch as recorded")
+    st.code(json.dumps(meta, ensure_ascii=False, indent=2), language="json")
+    if doc["matrix"]:
+        st.subheader("Matrix as stored")
+        st.dataframe(pd.DataFrame([{k: _archive_cell(v) for k, v in row.items()}
+                                   for row in doc["matrix"]]),
+                     hide_index=True, width="stretch")
+    results = doc["results"]
+    st.subheader(f"Runs ({len(results)})")
+    if results:
+        columns = ("run_id", "model_name", "scenario_id", "defense_id", "temperature",
+                   "repetition_index", "cell", "compromised", "task_completed",
+                   "tripwire_canary_read", "tripwire_unauth_tool_call",
+                   "tripwire_canary_exfiltrated", "tripwire_honeypot_endpoint_hit",
+                   "invalid_reason")
+        st.dataframe(pd.DataFrame([{c: _archive_cell(r.get(c)) for c in columns if c in r}
+                                   for r in results]), hide_index=True, width="stretch")
+        run_ids = [str(r["run_id"]) for r in results
+                   if archive.RUN_ID_RE.fullmatch(str(r.get("run_id", "")))]
+        if run_ids:
+            run_id = st.selectbox("Transcript of run", run_ids,
+                                  key=f"archive_run_{batch_id}")
+            text = archive.read_transcript(s["results_dir"], batch_id, run_id)
+            if text is None:
+                st.write("No transcript file was stored for this run.")
+            else:
+                st.code(text, language=None)   # model text: plain, never rendered
+    if doc["summary"] is not None:
+        st.subheader("Summary as written")
+        st.code(doc["summary"], language=None)
+    if doc["limitation"]:
+        st.caption("Limitation recorded with this batch: " + doc["limitation"])
+
+
 def main() -> None:
     st.set_page_config(page_title="redteam2.0", layout="wide")
     try:
@@ -521,7 +594,8 @@ def main() -> None:
     page = st.sidebar.radio("Page", PAGES, key="page")
     st.sidebar.caption("Every grade shown here was stored by the grader. This app never "
                        "grades and never shows a key.")
-    {"Run": page_run, "Results": page_results, "Inspect a run": page_inspect}[page](s)
+    {"Run": page_run, "Results": page_results, "Inspect a run": page_inspect,
+     "Archive": page_archive}[page](s)
 
 
 main()

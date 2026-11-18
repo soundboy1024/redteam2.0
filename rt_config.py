@@ -16,6 +16,8 @@ REQUIRED_KEYS = (
 )
 _DEFENSE_ID = re.compile(r"[a-z0-9_]{1,40}")
 CANARY_FIELDS = ("id", "fixture", "file", "token")
+# A batch with a local model stops itself under this much free memory (CLAUDE.md 4.11).
+DEFAULT_STOP_FREE_MEMORY_GB = 2.0
 
 
 class ConfigError(Exception):
@@ -111,6 +113,11 @@ def load_config(path: str) -> dict:
     for key in REQUIRED_KEYS:
         if key not in cfg:
             raise ConfigError(f"{path}: missing required key '{key}'")
+    floor = cfg.setdefault("batch_stop_free_memory_gb", DEFAULT_STOP_FREE_MEMORY_GB)
+    if isinstance(floor, bool) or not isinstance(floor, (int, float)) \
+            or not math.isfinite(floor) or floor < 0:
+        raise ConfigError(f"{path}: batch_stop_free_memory_gb must be a number, 0 or "
+                          f"more (0 turns the check off), got {floor!r}")
     _check_temperatures(cfg["temperatures"], path)
     _check_remote(cfg, path)
     _check_defenses(cfg, path)

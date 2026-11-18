@@ -67,7 +67,7 @@ def test_gate5_passes(sweepdir, tmp_path):
     rc, doc, txt = _main(tmp_path)
     assert rc == 0 and doc["passed"] is True and txt.splitlines()[-1] == "GATE 5: PASS"
     assert "tiny:1b" in txt and "completed" in txt and "pull_failed" in txt
-    assert "exact string match" in txt and "director's call" in txt
+    assert "disguised forms" in txt and "director's call" in txt
     assert len(doc["data"]["records"]) == 2
 
 

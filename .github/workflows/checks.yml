@@ -1,0 +1,32 @@
+# Runs on every push and pull request: the key scan, the project rules, the scenario
+# check and the tests. No model is called and no key is needed.
+name: checks
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  checks:
+    # The harness is built and run on Windows (process and memory calls use the Windows API).
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+      - name: Install the pinned packages
+        run: python -m pip install -r requirements.txt
+      - name: Key scan
+        run: python scripts/check_secrets.py
+      - name: Project rules
+        run: python scripts/check_rules.py
+      - name: Scenarios
+        run: python -m traps.validate_scenarios
+      - name: Tests
+        run: python -m pytest -q

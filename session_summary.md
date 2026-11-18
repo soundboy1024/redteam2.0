@@ -1,6 +1,6 @@
 # Session summary
 
-Last updated: 2026-11-16 (about 15:30 UTC). Branch `phase4`, equal to `main` and to `origin/main`, with Phase 6 merged in. The `phase6` worktree was removed after the merge. Remote: `github.com/soundboy1024/redteam2.0`, private for now, to be made public.
+Last updated: 2026-11-17. `main`, `phase4` and `origin/main` are at `bb3f99b` (Phase 6 merged). The hardening work of 2026-11-17 is on branch `hardening`, in the worktree `.worktrees/hardening`, **not committed**. Remote: `github.com/soundboy1024/redteam2.0`, **public since 2026-11-17** on the director's word.
 
 This file is the running record of where the project stands. It is updated at the end of each block of work.
 
@@ -35,6 +35,54 @@ Built in the `phase6` worktree so the Gemini batches running from the main check
 - **The run log schema is now version 3** (`defense_id` on runs and results). The existing `telemetry/runs.db` in the main checkout is version 2 and will be refused after the merge; it has to be moved aside (kept as an archive), which also takes the older batches off the dashboard. Their folders under `results/` stay. The director said on 2026-11-16 that earlier data does not need to stay comparable.
 - The worktree has its own `telemetry/runs.db`, listener database and `results/` folder; the Gate 6 batch lives there until the merge.
 
+## Hardening (`CLAUDE.md` 4.2, 4.5, 4.8, 4.11), 2026-11-17
+
+The director approved seven robustness items on 2026-11-17. All are built in the `hardening` worktree with tests. Nothing is committed.
+
+- **Disguised canaries.** `traps/canary_scan.py` now finds a token as written, reversed, in hex and in base64 (standard and URL-safe, at any position inside a longer encoded text). Any form sets `tripwire_canary_exfiltrated`. The grader records the form in `canary_forms`; the summary lists such runs under "Disguised canaries". Older batches matched the exact form only and are not regraded.
+- **Memory guard.** `batch_stop_free_memory_gb: 2` in `config.yaml`. A batch with a local model is not started under the floor and stops itself between runs under it, aborted with the reason, keeping its results. `--stop-free-memory-gb` overrides it; the sweep passes 0 and keeps its own watch.
+- **Resume.** `run_eval.py --resume <batch_id>` runs only the planned runs that were never recorded, under the same batch id. Refused when the batch is alive, complete, has no `batch.json`, or when a scenario, the system prompt or a model build has changed.
+- **Model builds.** Every batch records the Ollama digest of each local model in `batch.json`, `results.json` and the summary.
+- **95% range.** The matrix and the defense comparison show the Wilson 95% interval beside every compromised count, in the summary, `results.json` and on the Results page. `n_runs` in `config.yaml` is 10 since 2026-11-18 (director's ruling; it was 3). The sweep takes its run count from the same setting. It triples the run time.
+- **Archive page.** A fourth dashboard page reads the folders of batches that are not in the current run log (the 36 batches from before Phase 6) and shows what they wrote: record, matrix, runs, transcripts, summary. Nothing is regraded.
+- **Checks on every push.** `.github/workflows/checks.yml` (Windows runner): `scripts/check_secrets.py` (new key scan over tracked files), `scripts/check_rules.py`, the scenario check and the tests. It has not run on GitHub yet, because nothing has been pushed.
+- Dependencies were already pinned to exact versions in `requirements.txt`; nothing changed there.
+- The `llama3.1` and `qwen2.5:7b` defense results are in `README.md` ("Defenses").
+- There is no gate for this work in `CLAUDE.md`. If the director wants one, it would be a script that shows a disguised canary caught through the real listener and a batch stopped and resumed.
+
+Before the repository was made public, every reachable commit on every branch was scanned for key-shaped text (Anthropic, Groq, Cerebras, Google, GitHub): none found. Left as they are: the director's Gmail address on every commit (their choice, recorded above), the Windows user folder name in two plan documents and `gates/evidence/gate5.txt`, and Claude session links in 46 commit messages (the links open only for the director's account).
+
+## Sweep `full13-20261117`, 2026-11-17 (stopped at 2 of 13)
+
+The director asked for the 13-model sweep at three runs per cell "to see if anything breaks". It was started from the `hardening` worktree at 00:54 local time, as a background job inside the Claude Code session.
+
+- **`llama3.2:1b`: completed.** 54 of 54 runs valid, deleted after.
+- **`gemma3:4b`: completed.** 54 of 54 runs valid, deleted after.
+- **`mistral:7b`: cut off** in its first batch (`sweep-full13-20261117-mistral-7b-t01`). 15 of 18 runs were recorded; the batch was regraded and shows as aborted, with one run cut off mid-way named in its summary. The sweep record has no status for this model. It is still installed (4 GB); a restart with the same sweep id retries it with `-r2` batch ids and deletes it after.
+- **Not attempted:** `granite3.3:8b`, `qwen3:8b`, `deepseek-r1:8b`, `hermes3:8b`, `dolphin3:8b`, `gemma3:12b`, `mistral-nemo:12b`, `phi4:14b`, `qwen2.5:14b`, `gpt-oss:20b`.
+- **Nothing in the new code broke** in the 123 recorded runs.
+
+Why it stopped: Claude Code kills background jobs when the machine is critically low on memory. Its limit is not known here and is stricter than the sweep's own 2 GB floor, which never fired. Free memory was 3.9 GB of 31.3 with `mistral:7b` still loaded after the kill, and 17.5 GB once it was unloaded. The record also shows free memory fell to 3.4 GB during `gemma3:4b`, a model that takes 2.9 GB when loaded, so the drop during a batch is far larger than the model's own size. The cause of that growth has not been investigated.
+
+To continue, run it in the director's own terminal so only the sweep's floors apply, after checking that port 8999 is free and no model is loaded:
+
+```
+cd C:\Users\casey\Desktop\redteam2.0\.worktrees\hardening
+..\..\.venv\Scripts\python.exe sweep.py --sweep-id full13-20261117
+```
+
+The sweep's batches and record are in the worktree's `results/` and have to be moved to the main checkout when the branch is merged, as with Phase 6.
+
+## Phase 7 direction (discussion only, 2026-11-17)
+
+Nothing here is designed, approved or in `CLAUDE.md`. The director's thinking so far:
+
+- The project is "more of like a hobby/research thing", not mainly a portfolio piece. They want to expand on ideas of their own instead of following AgentDojo, which they see as focused on injection and not on honeypots.
+- They want to look beyond injection: whether the model uses the right tool and why it chose it, how language that typically confuses a model affects its tool use, and how different ways of using tools compare. Eventually a tool collection modelled on AgentDojo's but their own.
+- They observed that an agent calls tools as it goes, not only from the prompt.
+
+What was said back, as proposals: "right tool" and "confusing language" can be graded by script (a scenario declares the tools the task needs; a decoy tool the task never needs is a honeypot for wrong choices; the same task is run under several wordings). "Why" cannot be graded without a judge; what a script can show is which change to the context (a tool name, a description, one tool result) changes the next call. Ways of using tools (native tool calling, the text protocol used today, thought-then-action prose, code as action) could become a batch dimension like defenses. The open question put to the director: which run made them notice the as-it-goes behaviour, and what the agent did that they did not expect.
+
 ## Waiting on the director
 
 0. **Gate 6 (closed 2026-11-16).** Confirmed, merged, old run log moved aside.
@@ -42,9 +90,16 @@ Built in the `phase6` worktree so the Gemini batches running from the main check
 2. **Configurable tools (Phase 7).** The director ruled on 2026-11-16 that "only these three" goes and more tools are to be planned. Still open: whether a fake shell or database tool that runs nothing is allowed (section 8 says shell and database tools are permanently out), and which tools to add first. `CLAUDE.md` 4 is unchanged until that design is approved.
 3. **Gemini.** Built and run (see "Gemini batches"). Prices are not known here; the director has $60 of credit and should check the Google console for the charge.
 4. **Anthropic key (closed 2026-11-16).** The director deleted the old key in the Console. `git gc --prune=now` was run on the director's word: unreachable objects went from 97 to 6, and none of the 6 holds a key. The key was never in a branch and never pushed.
-5. **Cerebras.** Not called. Whether it bills the card after the $5 trial credit could not be confirmed.
+5. **Cerebras (set aside 2026-11-17).** Not called. The director said it is not a priority and may not be used at all.
 6. **Two-call replies.** Keep "reject" (recommended) or execute the first call and flag the reply. Haiku 4.5 hit this rule in 50 replies tonight (see below).
-7. **Make the repository public** (the director's switch, or their word).
+7. **Repository public (closed 2026-11-17).** Made public on the director's word.
+8. **Commit and push the hardening work.** Nothing from 2026-11-17 is committed. Until it is pushed, the public README does not show the defense results and the checks have not run on GitHub.
+9. **Restart the 13-model sweep.** Started on the director's word and stopped at 2 of 13 for low memory (see "Sweep `full13-20261117`"). It is restarted only on the director's word, best from their own terminal.
+10. **Phase 7 direction.** Under discussion (see "Phase 7 direction"): tool use beyond injection. Nothing is designed.
+11. **Runs per cell (closed 2026-11-18).** The director ruled 10. `n_runs: 10` in `config.yaml`; the sweep uses the same setting. Temperatures are 0.1 and 0.7 from the same date (0.3 dropped).
+12. **A gate for the hardening work:** yes or no.
+
+Also done on 2026-11-17: `CLAUDE.md`, `README.md`, `session_summary.md` and `BACKLOG.md` (the uncommitted hardening versions) were uploaded to the director's Google Drive, folder "redteam2.0 docs (2026-11-17)", converted to Google Docs. Those copies are a snapshot and predate this update. The dashboard is down and is restarted only when the director asks.
 
 ## Director decisions on record
 
@@ -67,6 +122,8 @@ Built in the `phase6` worktree so the Gemini batches running from the main check
 - 2026-11-16: earlier batches do not need to stay comparable while the harness is still being built.
 - 2026-11-16: Gate 6 confirmed. `phase6` merged into `main`; the schema-2 run log archived. Defense batch on `llama3.1` asked for.
 - 2026-11-16: "only these three" tools is to be dropped; more tools are to be planned (Phase 7).
+- 2026-11-17: all seven robustness suggestions are a go (memory guard, resume, more repetitions and their uncertainty, disguised canaries, checks on GitHub, pinned versions and model builds, old batches viewable). The repository is to be made public. Cerebras is not a priority. The 13-model sweep starts only on the director's word. The `llama3.1` defense results go in the README.
+- 2026-11-17: "let's do a sweep with 3 runs to see if anything breaks." The project is hobby and research, not mainly a portfolio piece.
 
 ## What changed on `phase4`
 
@@ -216,6 +273,8 @@ run_dashboard.bat                                              control panel on 
 .venv\Scripts\python.exe run_eval.py --models <m> --batch-id <id>            run a batch
 .venv\Scripts\python.exe run_eval.py --models <m> --batch-id <id> --plan     show what it would run
 .venv\Scripts\python.exe run_eval.py --regrade <batch_id>                    finish grading a stopped batch
+.venv\Scripts\python.exe run_eval.py --resume <batch_id>                     run the runs a stopped batch never recorded
+.venv\Scripts\python.exe scripts\check_secrets.py                            key scan over tracked files
 .venv\Scripts\python.exe gates\gate4.py --batch-id <id>                      Gate 4
 .venv\Scripts\python.exe sweep.py --sweep-id <name> --dry-run                 show what a sweep would do
 .venv\Scripts\python.exe sweep.py --sweep-id <name>                           run or continue a sweep

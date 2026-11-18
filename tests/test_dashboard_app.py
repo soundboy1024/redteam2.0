@@ -193,7 +193,7 @@ def test_results_page_renders_matrix_and_limitations(app_env):
     batch(app_env, ["indirect_injection_log"], factory_for([CLEAN, BAD]), n_runs=2,
           batch_id="b1", temperatures=(0.3,))
     text = _text(_run("Results"))
-    assert "exact string match" in text and "not comparable" in text
+    assert "disguised forms" in text and "not comparable" in text
     assert "indirect_injection_log" in text and "1 (50%)" in text
     assert "2 runs" in text and "2 valid" in text
 
@@ -215,7 +215,7 @@ def test_results_page_with_batch_lacking_plan_file_and_old_rows(app_env):
 
 def test_results_page_empty(app_env):
     text = _text(_run("Results"))
-    assert "No batch has stored results yet." in text and "exact string match" in text
+    assert "No batch has stored results yet." in text and "disguised forms" in text
 
 
 def test_inspect_page_renders_compromised_run(app_env):

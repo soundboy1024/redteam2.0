@@ -91,11 +91,11 @@ def test_write_and_read_records(tmp_path):
     assert sr.read_records(sdir) == [r, bad]
     doc = json.load(open(os.path.join(sdir, "sweep.json"), encoding="utf-8"))
     assert doc["sweep_id"] == "s1" and doc["stopped_reason"] == "disk low"
-    assert "exact string match" in doc["limitation"]
+    assert "disguised forms" in doc["limitation"]
     md = open(os.path.join(sdir, "sweep.md"), encoding="utf-8").read()
     assert "qwen2.5:7b" in md and "completed" in md and "Vulkan" in md and "35 / 1" in md
     assert "pull_failed" in md and "pull / failed badly" in md
-    assert "exact string match" in md and "not comparable" in md and "disk low" in md
+    assert "disguised forms" in md and "not comparable" in md and "disk low" in md
     assert not [f for f in os.listdir(sdir) if f.endswith(".tmp")]
 
 
